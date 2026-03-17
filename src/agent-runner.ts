@@ -2,6 +2,7 @@ import type { AgentBackend, AgentConfig } from './config.js';
 import { ClaudeCodeRunner } from './claude-code.js';
 import { CodexRunner } from './codex-cli.js';
 import { GeminiRunner } from './gemini-cli.js';
+import { LocalLlmRunner } from './local-llm/runner.js';
 import { RunnerManager } from './runner-manager.js';
 
 export interface RunOptions {
@@ -52,6 +53,8 @@ export function createAgentRunner(backend: AgentBackend, config: AgentConfig): A
       return new CodexRunner(config);
     case 'gemini':
       return new GeminiRunner(config);
+    case 'local-llm':
+      return new LocalLlmRunner(config);
     default:
       throw new Error(`Unknown agent backend: ${backend}`);
   }
@@ -97,6 +100,8 @@ export function getBackendDisplayName(backend: AgentBackend): string {
       return 'Codex';
     case 'gemini':
       return 'Gemini';
+    case 'local-llm':
+      return 'Local LLM';
     default:
       return backend;
   }

@@ -4,7 +4,7 @@ xangiのアーキテクチャと設計思想について説明します。
 
 ## 概要
 
-xangiは「AI CLI（Claude Code / Codex CLI / Gemini CLI）をチャットプラットフォームから使えるようにするラッパー」です。
+xangiは「AI CLI（Claude Code / Codex CLI / Gemini CLI）やローカルLLM（Ollama等）をチャットプラットフォームから使えるようにするラッパー」です。
 
 ```
 User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
@@ -20,7 +20,7 @@ User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
 |----------|------|------|
 | Chat | ユーザーインターフェース | Discord.js, Slack Bolt |
 | xangi | AI CLIの統合・制御 | index.ts, agent-runner.ts |
-| AI CLI | 実際のAI処理 | Claude Code, Codex CLI, Gemini CLI |
+| AI CLI | 実際のAI処理 | Claude Code, Codex CLI, Gemini CLI, Local LLM |
 | Workspace | ファイル・スキル | skills/, AGENTS.md |
 
 ## コンポーネント
@@ -60,6 +60,7 @@ AGENTS.md / CHARACTER.md / USER.md 等のワークスペース設定は、各AI 
 | Claude Code | `CLAUDE.md` | `--append-system-prompt`（一回限り） |
 | Codex CLI | `AGENTS.md` | `<system-context>` タグで埋め込み |
 | Gemini CLI | `GEMINI.md` | CLI側で自動読み込み（xangi側の注入なし） |
+| Local LLM | `AGENTS.md`, `MEMORY.md` | システムプロンプトに直接埋め込み（`CLAUDE.md` は通常 `AGENTS.md` のシンボリックリンクのため除外） |
 
 ### AI CLIアダプター
 
@@ -69,6 +70,7 @@ AGENTS.md / CHARACTER.md / USER.md 等のワークスペース設定は、各AI 
 | persistent-runner.ts | Claude Code（常駐） | `--input-format=stream-json` で常駐プロセス化、キュー管理、サーキットブレーカー |
 | codex-cli.ts | Codex CLI | OpenAI製、0.98.0対応、cancel対応 |
 | gemini-cli.ts | Gemini CLI | Google製、セッション管理、ストリーミング対応 |
+| local-llm/runner.ts | Local LLM | Ollama等のローカルLLMを直接呼び出し、ツール実行・ストリーミング対応 |
 
 ### スケジューラー（scheduler.ts）
 
@@ -176,7 +178,7 @@ AI CLIの実装詳細を隠蔽し、交換可能に：
 
 ```typescript
 // 設定でバックエンドを切り替え
-AGENT_BACKEND=claude-code  # or codex or gemini
+AGENT_BACKEND=claude-code  # or codex or gemini or local-llm
 ```
 
 将来的に新しいAI CLIが登場しても、アダプターを追加するだけで対応可能。
@@ -238,6 +240,12 @@ src/
 ├── persistent-runner.ts # Claude Codeアダプター（常駐プロセス）
 ├── codex-cli.ts        # Codex CLIアダプター
 ├── gemini-cli.ts       # Gemini CLIアダプター
+├── local-llm/          # Local LLMアダプター
+│   ├── runner.ts       #   メインランナー（セッション管理・ツール実行ループ）
+│   ├── llm-client.ts   #   LLM APIクライアント（Ollama native + OpenAI互換）
+│   ├── context.ts      #   ワークスペースコンテキスト読み込み
+│   ├── tools.ts        #   ビルトインツール（exec/read/web_fetch）
+│   └── types.ts        #   型定義
 ├── scheduler.ts        # スケジューラー
 ├── schedule-cli.ts     # スケジューラーCLI
 ├── skills.ts           # スキルローダー
@@ -309,7 +317,7 @@ prompts/
 
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
-| `AGENT_BACKEND` | AI CLI（`claude-code` / `codex` / `gemini`） | `claude-code` |
+| `AGENT_BACKEND` | AI CLI（`claude-code` / `codex` / `gemini` / `local-llm`） | `claude-code` |
 | `AGENT_MODEL` | 使用するモデル | - |
 | `WORKSPACE_PATH` | 作業ディレクトリ（ホストのパス） | - |
 | `SKIP_PERMISSIONS` | デフォルトで許可スキップ | `false` |
@@ -318,6 +326,26 @@ prompts/
 | `MAX_PROCESSES` | 同時実行プロセス数の上限 | `10` |
 | `IDLE_TIMEOUT_MS` | アイドルプロセスの自動終了時間（ミリ秒） | `1800000`（30分） |
 | `DATA_DIR` | データ保存ディレクトリ | `/workspace/.xangi` |
+
+### Local LLM（`AGENT_BACKEND=local-llm` 時）
+
+| 変数 | 説明 | デフォルト |
+|------|------|-----------|
+| `LOCAL_LLM_BASE_URL` | LLMサーバーURL（Ollama等） | `http://localhost:11434` |
+| `LOCAL_LLM_MODEL` | 使用するモデル名 | - |
+| `LOCAL_LLM_API_KEY` | APIキー（vLLM等で必要な場合） | - |
+| `LOCAL_LLM_THINKING` | Thinkingモデルの推論を有効にするか | `true` |
+| `LOCAL_LLM_MAX_TOKENS` | 最大トークン数 | `8192` |
+
+**対応モデル例（Ollama）:**
+- `nemotron-3-nano` — NVIDIA Nemotron 3 Nano（24GB）軽量・高速
+- `nemotron-3-super` — NVIDIA Nemotron 3 Super（86GB）高精度・エージェント向け
+- `qwen3.5:9b` — Qwen 3.5 9B（9GB）Thinking対応
+- その他Ollamaで利用可能なモデル
+
+**API対応:**
+- Ollama native API（`/api/chat`）— `think:false` 対応、ストリーミング
+- OpenAI互換API（`/v1/chat/completions`）— vLLM等にも対応
 
 ### GitHub CLI
 

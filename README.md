@@ -2,11 +2,11 @@
 
 > **A**I **N**EON **G**ENESIS **I**NTELLIGENCE
 
-Claude Code / Codex / Gemini CLI をバックエンドに、Discord から利用できる AI アシスタント。
+Claude Code / Codex / Gemini CLI / Local LLM（Ollama等）をバックエンドに、Discord から利用できる AI アシスタント。
 
 ## Features
 
-- 🤖 マルチバックエンド対応（Claude Code / Codex / Gemini CLI）
+- 🤖 マルチバックエンド対応（Claude Code / Codex / Gemini CLI / Local LLM）
 - 💬 Discord 対応
 - 👤 シングルユーザー設計
 - 🐳 Docker対応（コンテナ隔離環境）
@@ -48,6 +48,7 @@ DISCORD_ALLOWED_USER=123456789012345678
 # Claude Code: curl -fsSL https://claude.ai/install.sh | bash
 # Codex CLI:   npm install -g @openai/codex
 # Gemini CLI:  npm install -g @google/gemini-cli
+# Local LLM:   Ollama (https://ollama.com) をインストール
 
 npm install
 npm run build
@@ -116,7 +117,11 @@ docker exec -it xangi claude
 
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
-| `AGENT_BACKEND` | エージェントバックエンド（`claude-code` / `codex` / `gemini`） | `claude-code` |
+| `AGENT_BACKEND` | エージェントバックエンド（`claude-code` / `codex` / `gemini` / `local-llm`） | `claude-code` |
+| `LOCAL_LLM_BASE_URL` | LLMサーバーURL（`local-llm`時） | `http://localhost:11434` |
+| `LOCAL_LLM_MODEL` | 使用モデル名（`local-llm`時） | - |
+| `LOCAL_LLM_THINKING` | Thinkingモデルの推論有効化（`local-llm`時） | `true` |
+| `LOCAL_LLM_MAX_TOKENS` | 最大トークン数（`local-llm`時） | `8192` |
 | `WORKSPACE_PATH` | 作業ディレクトリ（ホストのパス） | `./workspace` |
 | `AUTO_REPLY_CHANNELS` | メンションなしで応答するチャンネルID（カンマ区切り） | - |
 | `AGENT_MODEL` | 使用するモデル | - |
