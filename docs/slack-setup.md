@@ -52,6 +52,7 @@ xangi は Socket Mode で動作します（Webhook 不要）。
 |-------|------|------|
 | `app_mentions:read` | メンションの読み取り | 必須 |
 | `chat:write` | メッセージ送信 | 必須 |
+| `files:read` | ファイルの読み取り | 添付ファイル対応時 |
 | `reactions:write` | リアクション追加（👀など） | 必須 |
 | `im:history` | DM の履歴読み取り | DM対応時 |
 | `im:read` | DM の読み取り | DM対応時 |
@@ -94,8 +95,11 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-token
 
 # 許可するユーザー ID（Slack の User ID）
-ALLOWED_USER=U01234567
+SLACK_ALLOWED_USER=U01234567
 ```
+
+> **⚠️ Slack のみで使用する場合は `.env` から `DISCORD_TOKEN` を削除（またはコメントアウト）してください。**
+> `DISCORD_TOKEN` が設定されていると Discord 側の設定（`DISCORD_ALLOWED_USER` など）も必要になります。
 
 ## 9. 動作確認
 
