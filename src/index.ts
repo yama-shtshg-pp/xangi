@@ -1414,7 +1414,11 @@ async function main() {
           } else {
             errorDetail = `❌ エラー: ${errorMsg.slice(0, 200)}`;
           }
-          await thinkingMsg.edit(errorDetail);
+          // editだと通知が飛ばないので新規送信
+          await thinkingMsg.delete().catch(() => {});
+          await (channel as { send: (content: string) => Promise<unknown> })
+            .send(errorDetail)
+            .catch(() => {});
         }
         throw error;
       }
@@ -1894,17 +1898,11 @@ async function processPrompt(
     }
 
     // エラー詳細を表示
+    // editだと通知が飛ばないので、異常系は新規replyで通知付き送信
     if (replyMessage) {
-      // editだと通知が飛ばないので、タイムアウト時は新規replyで通知付き送信
-      if (errorMsg.includes('timed out')) {
-        await replyMessage.delete().catch(() => {});
-        await message.reply(errorDetail).catch(() => {});
-      } else {
-        await replyMessage.edit(errorDetail).catch(() => {});
-      }
-    } else {
-      await message.reply(errorDetail).catch(() => {});
+      await replyMessage.delete().catch(() => {});
     }
+    await message.reply(errorDetail).catch(() => {});
 
     // エラー後にエージェントへ自動フォローアップ（タイムアウト・サーキットブレーカー時は除く）
     // タイムアウト時のフォローアップは壊れたセッションにさらに負荷をかけるだけで、
