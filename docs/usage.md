@@ -66,6 +66,15 @@ INJECT_TIMESTAMP=false
 | `/new`, `!new`, `new`       | 新しいセッションを開始 |
 | `/clear`, `!clear`, `clear` | セッション履歴をクリア |
 
+### Discordボタン操作
+
+応答メッセージにボタンが表示されます。
+
+- **処理中**: `Stop` ボタン — `/stop` と同等。タスクを中断
+- **完了後**: `New` ボタン — `/new` と同等。セッションをリセット
+
+`DISCORD_SHOW_BUTTONS=false` でボタンを非表示にできます。
+
 ## スケジューラー
 
 定期実行やリマインダーを設定できます。AIが自然言語を解釈して `!schedule` コマンドを自動実行します。
@@ -361,12 +370,12 @@ docker logs -f xangi-max
 | 環境 | 変数 | 説明 |
 |---|---|---|
 | ローカル | `WORKSPACE_PATH` | エージェントが直接使うパス |
-| Docker | `DOCKER_WORKSPACE_PATH` | ホスト側のパス（コンテナ内は `/workspace` に固定） |
+| Docker | `XANGI_WORKSPACE` | ホスト側のパス（コンテナ内は `/workspace` に固定） |
 
-Docker実行時は `.env` に `DOCKER_WORKSPACE_PATH` を設定します：
+Docker実行時は `.env` に `XANGI_WORKSPACE` を設定します：
 
 ```bash
-DOCKER_WORKSPACE_PATH=/home/user/my-workspace
+XANGI_WORKSPACE=/home/user/my-workspace
 ```
 
 > **⚠️ `WORKSPACE_PATH` は使わないこと。** ホストのシェル環境変数と衝突する可能性があります。
@@ -396,16 +405,23 @@ Local LLMバックエンドでもトランスクリプトログ（`logs/transcri
 
 Docker実行については [Docker実行](#docker実行) セクションを参照してください。
 
-### 軽量モード（小型モデル向け）
+### チャットモード
 
-小型モデル（8B等）を雑談ボットとして使う場合、`XANGI_COMMANDS`（`!discord send`、スケジューラー等のコマンド説明）や`CHAT_SYSTEM_PROMPT_PERSISTENT`がシステムプロンプトのノイズになり、モデルが混乱することがあります。
+tools非対応モデルや小型モデルを雑談ボットとして使いたい場合は、`LOCAL_LLM_MODE=chat` を設定します。
 
 ```bash
 # .env
-LOCAL_LLM_INJECT_XANGI_COMMANDS=false
+LOCAL_LLM_MODE=chat
 ```
 
-`false` に設定すると、XANGI_COMMANDSとCHAT_SYSTEM_PROMPT_PERSISTENTの注入をスキップし、AGENTS.md等のワークスペースコンテキストのみをシステムプロンプトにします。`!discord send` 等のコマンド実行機能は使えなくなりますが、シンプルな会話ボットとして安定動作します。
+チャットモードでは以下が無効化されます：
+
+- **tools送信** — Ollama APIにtoolsフィールドを送らないため、tools非対応モデルでも400エラーにならない
+- **スキル一覧** — システムプロンプトから除外
+- **XANGI_COMMANDS / CHAT_SYSTEM_PROMPT** — システムプロンプトから除外
+- **エージェントループ** — 1回のLLM呼び出しで完了（ツール実行なし）
+
+ワークスペースコンテキスト（AGENTS.md等）はチャットモードでも注入されます。
 
 ### マルチモーダル（画像入力）
 
@@ -498,7 +514,7 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `AGENT_BACKEND` | バックエンド（`claude-code` / `codex` / `gemini` / `local-llm`） | `claude-code` |
 | `AGENT_MODEL` | 使用するモデル | - |
 | `WORKSPACE_PATH` | 作業ディレクトリ（ローカル実行時） | `./workspace` |
-| `DOCKER_WORKSPACE_PATH` | ワークスペースのホスト側パス（Docker実行時） | `./workspace` |
+| `XANGI_WORKSPACE` | ワークスペースのホスト側パス（Docker実行時） | `./workspace` |
 | `SKIP_PERMISSIONS` | デフォルトで許可スキップ | `false` |
 | `TIMEOUT_MS` | タイムアウト（ミリ秒） | `300000` |
 | `PERSISTENT_MODE` | 常駐プロセスモード | `true` |
@@ -512,16 +528,16 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
 | `LOCAL_LLM_BASE_URL` | LLMサーバーURL | `http://localhost:11434` |
+| `LOCAL_LLM_MODE` | 動作モード（`agent`: ツール実行あり / `chat`: チャットのみ） | `agent` |
 | `LOCAL_LLM_MODEL` | 使用するモデル名 | - |
 | `LOCAL_LLM_API_KEY` | APIキー（vLLM等で必要な場合） | - |
 | `LOCAL_LLM_THINKING` | Thinkingモデルの推論を有効にするか | `true` |
 | `LOCAL_LLM_MAX_TOKENS` | 最大トークン数 | `8192` |
 | `LOCAL_LLM_NUM_CTX` | コンテキストウィンドウサイズ（Ollama用） | モデルのデフォルト |
-| `LOCAL_LLM_INJECT_XANGI_COMMANDS` | XANGI_COMMANDS等をシステムプロンプトに注入するか | `true` |
 | `EXEC_TIMEOUT_MS` | execツールのタイムアウト（ミリ秒） | `120000` |
 | `WEB_FETCH_TIMEOUT_MS` | web_fetchツールのタイムアウト（ミリ秒） | `15000` |
 
-### Slack（非推奨）
+### Slack
 
 | 変数 | 説明 |
 |------|------|

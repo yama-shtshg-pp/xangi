@@ -86,6 +86,8 @@ export class LocalLlmRunner implements AgentRunner {
   private readonly sessions = new Map<string, Session>();
   private readonly sessionTtlMs = 60 * 60 * 1000; // 1時間
   private readonly activeAbortControllers = new Map<string, AbortController>();
+  /** chatモード: tools/スキル/XANGI_COMMANDS無効、1回のLLM呼び出しで完了 */
+  readonly chatMode: boolean;
 
   constructor(config: AgentConfig) {
     const baseUrl = (process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434').replace(/\/$/, '');
@@ -99,10 +101,16 @@ export class LocalLlmRunner implements AgentRunner {
       ? parseInt(process.env.LOCAL_LLM_NUM_CTX, 10)
       : undefined;
 
+    // LOCAL_LLM_MODE: "agent" (default) or "chat"
+    const modeEnv = (process.env.LOCAL_LLM_MODE || 'agent').toLowerCase();
+    this.chatMode = modeEnv === 'chat';
+
     this.llm = new LLMClient(baseUrl, model, apiKey, thinking, maxTokens, numCtx);
     this.workdir = config.workdir || process.cwd();
 
-    console.log(`[local-llm] LLM: ${baseUrl} (model: ${model}, thinking: ${thinking})`);
+    console.log(
+      `[local-llm] LLM: ${baseUrl} (model: ${model}, thinking: ${thinking}, mode: ${this.chatMode ? 'chat' : 'agent'})`
+    );
   }
 
   async run(prompt: string, options?: RunOptions): Promise<RunResult> {
@@ -111,8 +119,8 @@ export class LocalLlmRunner implements AgentRunner {
 
     const session = this.getOrCreateSession(sessionId);
     const systemPrompt = this.buildSystemPrompt();
-    const tools = getBuiltinTools();
-    const llmTools = toLLMTools(tools);
+    const tools = this.chatMode ? [] : getBuiltinTools();
+    const llmTools = this.chatMode ? [] : toLLMTools(tools);
 
     // ユーザーメッセージ追加（画像添付があればマルチモーダルメッセージにする）
     const userMsg = this.buildUserMessage(prompt);
@@ -214,8 +222,8 @@ export class LocalLlmRunner implements AgentRunner {
 
     const session = this.getOrCreateSession(sessionId);
     const systemPrompt = this.buildSystemPrompt();
-    const tools = getBuiltinTools();
-    const llmTools = toLLMTools(tools);
+    const tools = this.chatMode ? [] : getBuiltinTools();
+    const llmTools = this.chatMode ? [] : toLLMTools(tools);
 
     const userMsg = this.buildUserMessage(prompt);
     session.messages.push(userMsg);
@@ -335,6 +343,7 @@ export class LocalLlmRunner implements AgentRunner {
 
   /**
    * エージェントループ（run用）: ツール呼び出しを含む非ストリーミング実行
+   * chatモードではツールなしの1回呼び出しで完了する。
    */
   private async executeAgentLoop(
     session: Session,
@@ -345,6 +354,24 @@ export class LocalLlmRunner implements AgentRunner {
     abortController: AbortController,
     options?: RunOptions
   ): Promise<string> {
+    // chatモード: 1回のLLM呼び出しで完了（ツールなし）
+    if (this.chatMode) {
+      let response;
+      try {
+        response = await this.llm.chat(session.messages, {
+          systemPrompt,
+          signal: abortController.signal,
+        });
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[local-llm] LLM chat call failed: ${errorMsg}`);
+        logError(this.workdir, channelId, `LLM chat call failed: ${errorMsg}`, sessionId);
+        throw err;
+      }
+      session.messages.push({ role: 'assistant', content: response.content });
+      return response.content;
+    }
+
     let toolRounds = 0;
     let finalContent = '';
 
@@ -423,6 +450,7 @@ export class LocalLlmRunner implements AgentRunner {
 
   /**
    * ストリーミングループ: ツール呼び出し + 最終応答ストリーミング
+   * chatモードではツールループをスキップし、直接ストリーミングで応答する。
    */
   private async executeStreamLoop(
     session: Session,
@@ -434,67 +462,70 @@ export class LocalLlmRunner implements AgentRunner {
     callbacks: StreamCallbacks,
     options?: RunOptions
   ): Promise<string> {
-    // ツールループ: non-streaming の chat() でツール呼び出しを処理
-    let toolRounds = 0;
-    while (toolRounds < MAX_TOOL_ROUNDS) {
-      let response;
-      try {
-        response = await this.llm.chat(session.messages, {
-          systemPrompt,
-          tools: llmTools.length > 0 ? llmTools : undefined,
-          signal: abortController.signal,
-        });
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        console.error(`[local-llm] LLM chat call failed (stream tool loop): ${errorMsg}`);
-        logError(
-          this.workdir,
-          channelId,
-          `LLM chat call failed (stream tool loop): ${errorMsg}`,
-          sessionId
-        );
-        throw err;
-      }
-
-      if (!response.toolCalls || response.toolCalls.length === 0) {
-        break;
-      }
-
-      // ツール呼び出し処理
-      session.messages.push({
-        role: 'assistant',
-        content: response.content ?? '',
-        toolCalls: response.toolCalls,
-      });
-
-      const toolContext = { workspace: this.workdir, channelId: options?.channelId };
-      for (const toolCall of response.toolCalls) {
-        console.log(
-          `[local-llm] Tool call: ${toolCall.name}(${JSON.stringify(toolCall.arguments).slice(0, 200)})`
-        );
-        const result = await executeTool(toolCall.name, toolCall.arguments, toolContext);
-        const rawToolOutput = result.success
-          ? result.output
-          : `Error: ${result.error ?? 'Unknown error'}${result.output ? `\nOutput: ${result.output}` : ''}`;
-        const toolResultContent = trimToolResult(rawToolOutput);
-        if (!result.success) {
+    // chatモードではツールループをスキップ
+    if (!this.chatMode) {
+      // ツールループ: non-streaming の chat() でツール呼び出しを処理
+      let toolRounds = 0;
+      while (toolRounds < MAX_TOOL_ROUNDS) {
+        let response;
+        try {
+          response = await this.llm.chat(session.messages, {
+            systemPrompt,
+            tools: llmTools.length > 0 ? llmTools : undefined,
+            signal: abortController.signal,
+          });
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          console.error(`[local-llm] LLM chat call failed (stream tool loop): ${errorMsg}`);
           logError(
             this.workdir,
             channelId,
-            `Tool ${toolCall.name} failed: ${rawToolOutput}`,
+            `LLM chat call failed (stream tool loop): ${errorMsg}`,
             sessionId
           );
+          throw err;
         }
-        console.log(
-          `[local-llm] Tool result: ${result.success ? 'OK' : 'FAIL'} (${toolResultContent.length} chars)`
-        );
+
+        if (!response.toolCalls || response.toolCalls.length === 0) {
+          break;
+        }
+
+        // ツール呼び出し処理
         session.messages.push({
-          role: 'tool',
-          content: toolResultContent,
-          toolCallId: toolCall.id,
+          role: 'assistant',
+          content: response.content ?? '',
+          toolCalls: response.toolCalls,
         });
+
+        const toolContext = { workspace: this.workdir, channelId: options?.channelId };
+        for (const toolCall of response.toolCalls) {
+          console.log(
+            `[local-llm] Tool call: ${toolCall.name}(${JSON.stringify(toolCall.arguments).slice(0, 200)})`
+          );
+          const result = await executeTool(toolCall.name, toolCall.arguments, toolContext);
+          const rawToolOutput = result.success
+            ? result.output
+            : `Error: ${result.error ?? 'Unknown error'}${result.output ? `\nOutput: ${result.output}` : ''}`;
+          const toolResultContent = trimToolResult(rawToolOutput);
+          if (!result.success) {
+            logError(
+              this.workdir,
+              channelId,
+              `Tool ${toolCall.name} failed: ${rawToolOutput}`,
+              sessionId
+            );
+          }
+          console.log(
+            `[local-llm] Tool result: ${result.success ? 'OK' : 'FAIL'} (${toolResultContent.length} chars)`
+          );
+          session.messages.push({
+            role: 'tool',
+            content: toolResultContent,
+            toolCallId: toolCall.id,
+          });
+        }
+        toolRounds++;
       }
-      toolRounds++;
     }
 
     // 最終応答をストリーミングで取得
@@ -552,26 +583,26 @@ export class LocalLlmRunner implements AgentRunner {
   private buildSystemPrompt(): string {
     const parts: string[] = [];
 
-    // チャットプラットフォーム説明 + xangiコマンド（base-runner共通）
-    // LOCAL_LLM_INJECT_XANGI_COMMANDS=false で小型モデル向けに注入をスキップ
-    const injectXangiCommands = process.env.LOCAL_LLM_INJECT_XANGI_COMMANDS !== 'false';
-    if (injectXangiCommands) {
+    // chatモードではXANGI_COMMANDS・CHAT_SYSTEM_PROMPT・スキル一覧を除外
+    if (!this.chatMode) {
       parts.push(CHAT_SYSTEM_PROMPT_PERSISTENT + '\n\n## XANGI_COMMANDS.md\n\n' + XANGI_COMMANDS);
     }
 
-    // ワークスペースコンテキスト（CLAUDE.md, AGENTS.md, MEMORY.md）
+    // ワークスペースコンテキスト（CLAUDE.md, AGENTS.md, MEMORY.md）— 両モードで注入
     const context = loadWorkspaceContext(this.workdir);
     if (context) parts.push(context);
 
-    // スキル一覧と使い方（karaagebot準拠: パスを明示）
-    const skills = loadSkills(this.workdir);
-    if (skills.length > 0) {
-      const skillLines = skills
-        .map((s) => `  - **${s.name}**: ${s.description}\n    SKILL.md: ${s.path}`)
-        .join('\n');
-      parts.push(
-        `## Available Skills\n\nUse the read tool to load SKILL.md before using a skill. NEVER guess commands — always read SKILL.md first.\n${skillLines}`
-      );
+    // スキル一覧と使い方 — agentモードのみ
+    if (!this.chatMode) {
+      const skills = loadSkills(this.workdir);
+      if (skills.length > 0) {
+        const skillLines = skills
+          .map((s) => `  - **${s.name}**: ${s.description}\n    SKILL.md: ${s.path}`)
+          .join('\n');
+        parts.push(
+          `## Available Skills\n\nUse the read tool to load SKILL.md before using a skill. NEVER guess commands — always read SKILL.md first.\n${skillLines}`
+        );
+      }
     }
 
     return parts.join('\n\n');

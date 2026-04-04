@@ -4,7 +4,7 @@
 
 > **A**I **N**EON **G**ENESIS **I**NTELLIGENCE
 
-An AI assistant for Discord, powered by Claude Code / Codex / Gemini CLI / Local LLM backends.
+An AI assistant for Discord / Slack, powered by Claude Code / Codex / Gemini CLI / Local LLM backends. Discord recommended.
 
 ## Features
 
@@ -93,9 +93,12 @@ pm2 logs xangi     # View logs
 |---------|-------------|
 | `/new` | Start a new session |
 | `/clear` | Clear session history |
+| `/stop` | Stop running task |
 | `/settings` | Show current settings |
 | `!schedule` | Scheduler (cron / reminders) |
 | `!discord` | Discord operations (send / search) |
+
+Response messages include buttons (Stop / New Session). Set `DISCORD_SHOW_BUTTONS=false` to hide.
 
 See [Usage Guide](docs/usage.md) for details.
 
@@ -141,10 +144,10 @@ A book about building AI assistants with xangi.
 
 ## Documentation
 
-- [Usage Guide](docs/usage.md) - Docker, env vars, Local LLM, troubleshooting
-- [Discord Setup](docs/discord-setup.md) - Bot creation & ID lookup
-- [Slack Setup](docs/slack-setup.md) - Slack integration (deprecated)
-- [Design Document](docs/design.md) - Architecture, design philosophy, data flow
+- [Usage Guide](docs/en/usage.md) - Docker, env vars, Local LLM, troubleshooting
+- [Discord Setup](docs/en/discord-setup.md) - Bot creation & ID lookup
+- [Slack Setup](docs/en/slack-setup.md) - Slack integration
+- [Design Document](docs/en/design.md) - Architecture, design philosophy, data flow
 
 ## Acknowledgments
 

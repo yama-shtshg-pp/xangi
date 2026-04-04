@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { isSessionRelatedError, formatLlmError } from '../src/local-llm/runner.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { isSessionRelatedError, formatLlmError, LocalLlmRunner } from '../src/local-llm/runner.js';
 
 describe('isSessionRelatedError', () => {
   it('should return true for "context length exceeded"', () => {
@@ -84,5 +84,53 @@ describe('formatLlmError', () => {
   it('should handle non-Error values', () => {
     const result = formatLlmError('not an error');
     expect(result).toContain('予期しないエラー');
+  });
+});
+
+describe('LocalLlmRunner chatMode', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+  const envKeys = ['LOCAL_LLM_MODE', 'LOCAL_LLM_BASE_URL', 'LOCAL_LLM_MODEL'];
+
+  beforeEach(() => {
+    for (const key of envKeys) {
+      savedEnv[key] = process.env[key];
+    }
+    // テスト用にデフォルト値を設定
+    process.env.LOCAL_LLM_BASE_URL = 'http://localhost:11434';
+    process.env.LOCAL_LLM_MODEL = 'test-model';
+  });
+
+  afterEach(() => {
+    for (const key of envKeys) {
+      if (savedEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it('should default to agent mode (chatMode=false)', () => {
+    delete process.env.LOCAL_LLM_MODE;
+    const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
+    expect(runner.chatMode).toBe(false);
+  });
+
+  it('should enable chatMode when LOCAL_LLM_MODE=chat', () => {
+    process.env.LOCAL_LLM_MODE = 'chat';
+    const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
+    expect(runner.chatMode).toBe(true);
+  });
+
+  it('should stay in agent mode when LOCAL_LLM_MODE=agent', () => {
+    process.env.LOCAL_LLM_MODE = 'agent';
+    const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
+    expect(runner.chatMode).toBe(false);
+  });
+
+  it('should be case-insensitive for LOCAL_LLM_MODE', () => {
+    process.env.LOCAL_LLM_MODE = 'Chat';
+    const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
+    expect(runner.chatMode).toBe(true);
   });
 });

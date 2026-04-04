@@ -4,12 +4,12 @@
 
 > **A**I **N**EON **G**ENESIS **I**NTELLIGENCE
 
-Claude Code / Codex / Gemini CLI / Local LLM をバックエンドに、Discord から利用できる AI アシスタント。
+Claude Code / Codex / Gemini CLI / Local LLM をバックエンドに、Discord / Slack から利用できる AI アシスタント。Discord 推奨。
 
 ## Features
 
 - マルチバックエンド対応（Claude Code / Codex / Gemini CLI / Local LLM）
-- Local LLM対応（Ollama/vLLM等）
+- Local LLM対応（Ollama/vLLM等、エージェントモード/チャットモード切替可能）
 - Discord / Slack 対応
 - Docker対応
 - スキルシステム
@@ -93,9 +93,12 @@ pm2 logs xangi     # ログ確認
 |----------|------|
 | `/new` | 新しいセッションを開始 |
 | `/clear` | セッション履歴をクリア |
+| `/stop` | 実行中のタスクを停止 |
 | `/settings` | 現在の設定を表示 |
 | `!schedule` | スケジューラー（定期実行・リマインダー） |
 | `!discord` | Discord操作（チャンネル送信・検索） |
+
+応答メッセージにはボタン（Stop / New Session）が表示されます。`DISCORD_SHOW_BUTTONS=false` で非表示。
 
 詳細は [使い方ガイド](docs/usage.md) を参照してください。
 
@@ -143,7 +146,7 @@ xangi を使ったAIアシスタント構築のノウハウをまとめた書籍
 
 - [使い方ガイド](docs/usage.md) - Docker実行・環境変数・Local LLM・トラブルシューティング
 - [Discord セットアップ](docs/discord-setup.md) - Bot作成・ID確認方法
-- [Slack セットアップ](docs/slack-setup.md) - Slack連携（非推奨）
+- [Slack セットアップ](docs/slack-setup.md) - Slack連携
 - [設計ドキュメント](docs/design.md) - アーキテクチャ・設計思想・データフロー
 
 ## Acknowledgments

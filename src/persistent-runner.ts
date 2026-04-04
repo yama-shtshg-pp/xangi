@@ -5,6 +5,7 @@ import { mergeTexts, sanitizeSurrogates } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { getSafeEnv } from './base-runner.js';
 import { buildPersistentSystemPrompt } from './base-runner.js';
+import type { ChatPlatform } from './prompts/index.js';
 import { logPrompt, logResponse, logError } from './transcript-logger.js';
 
 /**
@@ -54,13 +55,14 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     workdir?: string;
     skipPermissions?: boolean;
     channelId?: string;
+    platform?: ChatPlatform;
   }) {
     super();
     this.model = options?.model;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-    this.systemPrompt = buildPersistentSystemPrompt();
+    this.systemPrompt = buildPersistentSystemPrompt(options?.platform);
     this.channelId = options?.channelId;
   }
 

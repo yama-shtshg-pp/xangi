@@ -5,6 +5,7 @@ import { mergeTexts, sanitizeSurrogates } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { getSafeEnv } from './base-runner.js';
 import { buildSystemPrompt } from './base-runner.js';
+import type { ChatPlatform } from './prompts/index.js';
 import { logPrompt, logResponse } from './transcript-logger.js';
 
 export interface ClaudeCodeOptions {
@@ -12,6 +13,7 @@ export interface ClaudeCodeOptions {
   timeoutMs?: number;
   workdir?: string;
   skipPermissions?: boolean;
+  platform?: ChatPlatform;
 }
 
 interface ClaudeCodeResponse {
@@ -39,7 +41,7 @@ export class ClaudeCodeRunner {
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS; // デフォルト5分
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-    this.systemPrompt = buildSystemPrompt();
+    this.systemPrompt = buildSystemPrompt(options?.platform);
   }
 
   async run(rawPrompt: string, options?: RunOptions): Promise<RunResult> {

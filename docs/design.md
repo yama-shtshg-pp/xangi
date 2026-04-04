@@ -59,7 +59,12 @@ interface AgentRunner {
 xangiがAI CLIに注入するシステムプロンプトを管理：
 
 - **チャットプラットフォーム情報** — Discord/Slack経由の会話であることを伝える短い固定テキスト
-- **XANGI_COMMANDS.md** — `prompts/XANGI_COMMANDS.md` からDiscord操作コマンド・スケジューラー等の仕様を読み込み
+- **XANGI_COMMANDS** — `src/prompts/` からプラットフォームに応じたコマンド仕様を注入
+  - 共通コマンド（`xangi-commands-common.ts`）: ファイル送信・システムコマンド・スケジューラー等
+  - Discord専用（`xangi-commands-discord.ts`）: `!discord send/history/search/delete/edit`・自動展開
+  - Slack専用（`xangi-commands-slack.ts`）: Slack固有の操作
+  - プラットフォーム自動判別: Discordのみ有効なら Discord専用コマンドだけ注入（トークン節約）
+- **プラットフォーム識別** — 各メッセージに `[プラットフォーム: Discord]` or `[プラットフォーム: Slack]` を注入。AIが適切なコマンドを使い分け
 
 AGENTS.md / CHARACTER.md / USER.md 等のワークスペース設定は、各AI CLIの自動読み込み機能に委譲：
 

@@ -8,6 +8,9 @@ import {
   ChatInputCommandInteraction,
   Message,
   AutocompleteInteraction,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } from 'discord.js';
 import { loadConfig } from './config.js';
 import { createAgentRunner, getBackendDisplayName, type AgentRunner } from './agent-runner.js';
@@ -95,6 +98,20 @@ function getTypeLabel(
 // チャンネルごとの最後に送信したボットメッセージID
 const lastSentMessageIds = new Map<string, string>();
 
+/** 処理中に表示するStopボタン */
+function createStopButton(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('xangi_stop').setLabel('Stop').setStyle(ButtonStyle.Secondary)
+  );
+}
+
+/** 完了後に表示するNew Sessionボタン */
+function createCompletedButtons(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('xangi_new').setLabel('New').setStyle(ButtonStyle.Secondary)
+  );
+}
+
 /**
  * ツール入力の要約を生成（Discord表示用）
  */
@@ -167,9 +184,13 @@ async function main() {
   });
 
   // エージェントランナーを作成
-  const agentRunner = createAgentRunner(config.agent.backend, config.agent.config);
+  const agentRunner = createAgentRunner(config.agent.backend, config.agent.config, {
+    platform: config.agent.platform,
+  });
   const backendName = getBackendDisplayName(config.agent.backend);
-  console.log(`[xangi] Using ${backendName} as agent backend`);
+  console.log(
+    `[xangi] Using ${backendName} as agent backend (platform: ${config.agent.platform ?? 'all'})`
+  );
 
   // スキルを読み込み
   const workdir = config.agent.config.workdir || process.cwd();
@@ -300,6 +321,50 @@ async function main() {
     // オートコンプリート処理
     if (interaction.isAutocomplete()) {
       await handleAutocomplete(interaction, skills);
+      return;
+    }
+
+    // ボタンインタラクション処理
+    if (interaction.isButton()) {
+      const channelId = interaction.channelId;
+      // 許可チェック
+      if (
+        !config.discord.allowedUsers?.includes('*') &&
+        !config.discord.allowedUsers?.includes(interaction.user.id)
+      ) {
+        await interaction.reply({ content: '許可されていないユーザーです', ephemeral: true });
+        return;
+      }
+
+      if (interaction.customId === 'xangi_stop') {
+        const stopped = processManager.stop(channelId) || agentRunner.cancel?.(channelId) || false;
+        await interaction.deferUpdate().catch(() => {});
+        if (!stopped) {
+          await interaction.followUp({
+            content: '実行中のタスクがありません',
+            ephemeral: true,
+          });
+        }
+        return;
+      }
+
+      if (interaction.customId === 'xangi_new') {
+        deleteSession(channelId);
+        agentRunner.destroy?.(channelId);
+        // ボタンを消してメッセージを更新
+        await interaction
+          .update({
+            components: [],
+          })
+          .catch(() => {});
+        await interaction
+          .followUp({ content: '🆕 新しいセッションを開始しました', ephemeral: true })
+          .catch(() => {});
+        return;
+      }
+
+      // 未知のボタン → 何もせずACK
+      await interaction.deferUpdate().catch(() => {});
       return;
     }
 
@@ -1768,7 +1833,7 @@ async function processPrompt(
       'name' in message.channel ? (message.channel as { name: string }).name : null;
     const userInfo = `[発言者: ${message.author.displayName ?? message.author.username} (ID: ${message.author.id})]`;
     if (channelName) {
-      prompt = `[チャンネル: #${channelName} (ID: ${channelId})]\n${userInfo}\n${prompt}`;
+      prompt = `[プラットフォーム: Discord]\n[チャンネル: #${channelName} (ID: ${channelId})]\n${userInfo}\n${prompt}`;
     } else {
       prompt = `${userInfo}\n${prompt}`;
     }
@@ -1793,7 +1858,11 @@ async function processPrompt(
     }
 
     // 最初のメッセージを送信
-    replyMessage = await message.reply('🤔 考え中.');
+    const showButtons = config.discord.showButtons ?? true;
+    replyMessage = await message.reply({
+      content: '🤔 考え中.',
+      ...(showButtons && { components: [createStopButton()] }),
+    });
 
     let result: string;
     let newSessionId: string;
@@ -1899,7 +1968,10 @@ async function processPrompt(
 
     // 最初のパートは既存のreplyMessageを編集して送信
     const firstChunks = splitMessage(messageParts[0], DISCORD_SAFE_LENGTH);
-    await replyMessage!.edit(firstChunks[0] || '✅');
+    await replyMessage!.edit({
+      content: firstChunks[0] || '✅',
+      ...(showButtons && { components: [createCompletedButtons()] }),
+    });
     // 最後に送信したメッセージIDを記録
     if (replyMessage) {
       lastSentMessageIds.set(message.channel.id, replyMessage.id);
@@ -1947,7 +2019,10 @@ async function processPrompt(
       const toolDisplay = toolHistory.length > 0 ? '\n' + toolHistory.join('\n') + '\n' : '';
       const prefix = lastStreamedText ? lastStreamedText + '\n\n' : '';
       await replyMessage
-        ?.edit(`${prefix}🛑 停止しました${toolDisplay}`.slice(0, DISCORD_MAX_LENGTH))
+        ?.edit({
+          content: `${prefix}🛑 停止しました${toolDisplay}`.slice(0, DISCORD_MAX_LENGTH),
+          components: [],
+        })
         .catch(() => {});
       return null;
     }
@@ -1972,7 +2047,7 @@ async function processPrompt(
     const prefix = lastStreamedText ? lastStreamedText + '\n\n' : '';
     const errorMessage = `${prefix}${errorDetail}${toolDisplay}`.slice(0, DISCORD_MAX_LENGTH);
     if (replyMessage) {
-      await replyMessage.edit(errorMessage).catch(() => {});
+      await replyMessage.edit({ content: errorMessage, components: [] }).catch(() => {});
     } else {
       await message.reply(errorMessage).catch(() => {});
     }
