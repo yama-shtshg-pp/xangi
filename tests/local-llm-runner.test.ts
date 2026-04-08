@@ -87,7 +87,7 @@ describe('formatLlmError', () => {
   });
 });
 
-describe('LocalLlmRunner chatMode', () => {
+describe('LocalLlmRunner liteMode', () => {
   const savedEnv: Record<string, string | undefined> = {};
   const envKeys = ['LOCAL_LLM_MODE', 'LOCAL_LLM_BASE_URL', 'LOCAL_LLM_MODEL'];
 
@@ -110,27 +110,27 @@ describe('LocalLlmRunner chatMode', () => {
     }
   });
 
-  it('should default to agent mode (chatMode=false)', () => {
+  it('should default to agent mode (liteMode=false)', () => {
     delete process.env.LOCAL_LLM_MODE;
     const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
-    expect(runner.chatMode).toBe(false);
+    expect(runner.liteMode).toBe(false);
   });
 
-  it('should enable chatMode when LOCAL_LLM_MODE=chat', () => {
-    process.env.LOCAL_LLM_MODE = 'chat';
+  it('should enable liteMode when LOCAL_LLM_MODE=lite', () => {
+    process.env.LOCAL_LLM_MODE = 'lite';
     const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
-    expect(runner.chatMode).toBe(true);
+    expect(runner.liteMode).toBe(true);
   });
 
   it('should stay in agent mode when LOCAL_LLM_MODE=agent', () => {
     process.env.LOCAL_LLM_MODE = 'agent';
     const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
-    expect(runner.chatMode).toBe(false);
+    expect(runner.liteMode).toBe(false);
   });
 
   it('should be case-insensitive for LOCAL_LLM_MODE', () => {
-    process.env.LOCAL_LLM_MODE = 'Chat';
+    process.env.LOCAL_LLM_MODE = 'Lite';
     const runner = new LocalLlmRunner({ workdir: '/tmp', model: 'test' });
-    expect(runner.chatMode).toBe(true);
+    expect(runner.liteMode).toBe(true);
   });
 });

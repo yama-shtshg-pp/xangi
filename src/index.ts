@@ -13,6 +13,7 @@ import {
   ButtonStyle,
 } from 'discord.js';
 import { loadConfig } from './config.js';
+import { isGitHubAppEnabled } from './github-auth.js';
 import { createAgentRunner, getBackendDisplayName, type AgentRunner } from './agent-runner.js';
 import { ClaudeCodeRunner } from './claude-code.js';
 import { processManager } from './process-manager.js';
@@ -122,10 +123,13 @@ function formatToolInput(toolName: string, input: Record<string, unknown>): stri
     case 'Edit':
     case 'Write':
       return input.file_path ? `: ${String(input.file_path).split('/').slice(-2).join('/')}` : '';
-    case 'Bash':
-      return input.command
-        ? `: \`${String(input.command).slice(0, 60)}${String(input.command).length > 60 ? '...' : ''}\``
-        : '';
+    case 'Bash': {
+      if (!input.command) return '';
+      const cmd = String(input.command);
+      const cmdDisplay = `: \`${cmd.slice(0, 60)}${cmd.length > 60 ? '...' : ''}\``;
+      const ghBadge = cmd.startsWith('gh ') && isGitHubAppEnabled() ? ' 🔑App' : '';
+      return cmdDisplay + ghBadge;
+    }
     case 'Glob':
       return input.pattern ? `: ${String(input.pattern)}` : '';
     case 'Grep':
@@ -208,6 +212,10 @@ async function main() {
 
   // セッション永続化を初期化
   initSessions(dataDir);
+
+  // GitHub認証を初期化
+  const { initGitHubAuth } = await import('./github-auth.js');
+  initGitHubAuth();
 
   // スラッシュコマンド定義
   const commands: ReturnType<SlashCommandBuilder['toJSON']>[] = [

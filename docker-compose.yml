@@ -16,6 +16,8 @@ x-common: &common
     - ./prompts:/app/prompts:ro
     # Git設定
     - ~/.gitconfig:/home/node/.gitconfig:ro
+    # GitHub App秘密鍵（オプション、設定時のみ有効）
+    - ${GITHUB_APP_PRIVATE_KEY_PATH:-/dev/null}:/secrets/github-app.pem:ro
   environment: &common-env
     # env_fileから読み込まれない固定値のみここに記述
     - NODE_ENV=production

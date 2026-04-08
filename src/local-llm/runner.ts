@@ -14,6 +14,13 @@ import { getBuiltinTools, toLLMTools, executeTool } from './tools.js';
 import { loadSkills } from '../skills.js';
 import { CHAT_SYSTEM_PROMPT_PERSISTENT, XANGI_COMMANDS } from '../base-runner.js';
 import { logPrompt, logResponse, logError } from '../transcript-logger.js';
+import {
+  loadTriggers,
+  matchTrigger,
+  executeTrigger,
+  buildTriggersPrompt,
+  type Trigger,
+} from './triggers.js';
 
 const MAX_TOOL_ROUNDS = 10;
 const MAX_SESSION_MESSAGES = 50;
@@ -86,8 +93,10 @@ export class LocalLlmRunner implements AgentRunner {
   private readonly sessions = new Map<string, Session>();
   private readonly sessionTtlMs = 60 * 60 * 1000; // 1時間
   private readonly activeAbortControllers = new Map<string, AbortController>();
-  /** chatモード: tools/スキル/XANGI_COMMANDS無効、1回のLLM呼び出しで完了 */
-  readonly chatMode: boolean;
+  /** liteモード: tools/スキル/XANGI_COMMANDS無効、1回のLLM呼び出しで完了 */
+  readonly liteMode: boolean;
+  /** liteモード用トリガー定義 */
+  private triggers: Trigger[];
 
   constructor(config: AgentConfig) {
     const baseUrl = (process.env.LOCAL_LLM_BASE_URL || 'http://localhost:11434').replace(/\/$/, '');
@@ -101,16 +110,22 @@ export class LocalLlmRunner implements AgentRunner {
       ? parseInt(process.env.LOCAL_LLM_NUM_CTX, 10)
       : undefined;
 
-    // LOCAL_LLM_MODE: "agent" (default) or "chat"
+    // LOCAL_LLM_MODE: "agent" (default) or "lite"
     const modeEnv = (process.env.LOCAL_LLM_MODE || 'agent').toLowerCase();
-    this.chatMode = modeEnv === 'chat';
+    this.liteMode = modeEnv === 'lite';
 
     this.llm = new LLMClient(baseUrl, model, apiKey, thinking, maxTokens, numCtx);
     this.workdir = config.workdir || process.cwd();
 
+    // liteモード用トリガーを読み込み
+    this.triggers = this.liteMode ? loadTriggers(this.workdir) : [];
+
     console.log(
-      `[local-llm] LLM: ${baseUrl} (model: ${model}, thinking: ${thinking}, mode: ${this.chatMode ? 'chat' : 'agent'})`
+      `[local-llm] LLM: ${baseUrl} (model: ${model}, thinking: ${thinking}, mode: ${this.liteMode ? 'lite' : 'agent'})`
     );
+    if (this.triggers.length > 0) {
+      console.log(`[local-llm] Triggers loaded: ${this.triggers.map((t) => t.trigger).join(', ')}`);
+    }
   }
 
   async run(prompt: string, options?: RunOptions): Promise<RunResult> {
@@ -119,8 +134,8 @@ export class LocalLlmRunner implements AgentRunner {
 
     const session = this.getOrCreateSession(sessionId);
     const systemPrompt = this.buildSystemPrompt();
-    const tools = this.chatMode ? [] : getBuiltinTools();
-    const llmTools = this.chatMode ? [] : toLLMTools(tools);
+    const tools = this.liteMode ? [] : getBuiltinTools();
+    const llmTools = this.liteMode ? [] : toLLMTools(tools);
 
     // ユーザーメッセージ追加（画像添付があればマルチモーダルメッセージにする）
     const userMsg = this.buildUserMessage(prompt);
@@ -222,8 +237,8 @@ export class LocalLlmRunner implements AgentRunner {
 
     const session = this.getOrCreateSession(sessionId);
     const systemPrompt = this.buildSystemPrompt();
-    const tools = this.chatMode ? [] : getBuiltinTools();
-    const llmTools = this.chatMode ? [] : toLLMTools(tools);
+    const tools = this.liteMode ? [] : getBuiltinTools();
+    const llmTools = this.liteMode ? [] : toLLMTools(tools);
 
     const userMsg = this.buildUserMessage(prompt);
     session.messages.push(userMsg);
@@ -248,13 +263,44 @@ export class LocalLlmRunner implements AgentRunner {
       );
 
       session.messages.push({ role: 'assistant', content: fullText });
+
+      // トリガー検出・実行（liteモードのみ）
+      let finalText = fullText;
+      const triggerResult = await this.processTriggers(fullText, channelId, sessionId);
+      if (triggerResult !== null) {
+        const match = matchTrigger(fullText, this.triggers);
+        if (match?.trigger.feedback) {
+          // feedback: handler結果をLLMに戻して再応答
+          session.messages.push({
+            role: 'user',
+            content: `[${match.trigger.name}の結果]\n${triggerResult}`,
+          });
+          try {
+            const feedbackResponse = await this.llm.chat(session.messages, {
+              systemPrompt: this.buildSystemPrompt(),
+              signal: abortController.signal,
+            });
+            session.messages.push({ role: 'assistant', content: feedbackResponse.content });
+            finalText = feedbackResponse.content;
+            callbacks.onText?.(feedbackResponse.content, feedbackResponse.content);
+          } catch {
+            finalText = fullText + '\n\n' + triggerResult;
+            callbacks.onText?.('\n\n' + triggerResult, finalText);
+          }
+        } else {
+          // feedback: false — LLM応答 + trigger結果を表示
+          finalText = fullText + '\n\n' + triggerResult;
+          callbacks.onText?.('\n\n' + triggerResult, finalText);
+        }
+      }
+
       this.trimSession(session);
       session.updatedAt = Date.now();
 
       // トランスクリプトにレスポンスを記録
-      logResponse(this.workdir, channelId, { result: fullText, sessionId });
+      logResponse(this.workdir, channelId, { result: finalText, sessionId });
 
-      const result: RunResult = { result: fullText, sessionId };
+      const result: RunResult = { result: finalText, sessionId };
       callbacks.onComplete?.(result);
       return result;
     } catch (err) {
@@ -343,7 +389,7 @@ export class LocalLlmRunner implements AgentRunner {
 
   /**
    * エージェントループ（run用）: ツール呼び出しを含む非ストリーミング実行
-   * chatモードではツールなしの1回呼び出しで完了する。
+   * liteモードではツールなしの1回呼び出しで完了する。
    */
   private async executeAgentLoop(
     session: Session,
@@ -354,8 +400,8 @@ export class LocalLlmRunner implements AgentRunner {
     abortController: AbortController,
     options?: RunOptions
   ): Promise<string> {
-    // chatモード: 1回のLLM呼び出しで完了（ツールなし）
-    if (this.chatMode) {
+    // liteモード: 1回のLLM呼び出しで完了（ツールなし）+ トリガー検出
+    if (this.liteMode) {
       let response;
       try {
         response = await this.llm.chat(session.messages, {
@@ -369,6 +415,34 @@ export class LocalLlmRunner implements AgentRunner {
         throw err;
       }
       session.messages.push({ role: 'assistant', content: response.content });
+
+      // トリガー検出・実行
+      const triggerResult = await this.processTriggers(response.content, channelId, sessionId);
+      if (triggerResult !== null) {
+        // feedback: true のトリガーなら結果をLLMに戻して再応答
+        const match = matchTrigger(response.content, this.triggers);
+        if (match?.trigger.feedback) {
+          session.messages.push({
+            role: 'user',
+            content: `[${match.trigger.name}の結果]\n${triggerResult}`,
+          });
+          let feedbackResponse;
+          try {
+            feedbackResponse = await this.llm.chat(session.messages, {
+              systemPrompt,
+              signal: abortController.signal,
+            });
+          } catch {
+            // feedbackのLLM呼び出し失敗時はtrigger結果をそのまま返す
+            return response.content + '\n\n' + triggerResult;
+          }
+          session.messages.push({ role: 'assistant', content: feedbackResponse.content });
+          return feedbackResponse.content;
+        }
+        // feedback: false — LLM応答 + trigger結果を返す
+        return response.content + '\n\n' + triggerResult;
+      }
+
       return response.content;
     }
 
@@ -450,7 +524,7 @@ export class LocalLlmRunner implements AgentRunner {
 
   /**
    * ストリーミングループ: ツール呼び出し + 最終応答ストリーミング
-   * chatモードではツールループをスキップし、直接ストリーミングで応答する。
+   * liteモードではツールループをスキップし、直接ストリーミングで応答する。
    */
   private async executeStreamLoop(
     session: Session,
@@ -462,8 +536,8 @@ export class LocalLlmRunner implements AgentRunner {
     callbacks: StreamCallbacks,
     options?: RunOptions
   ): Promise<string> {
-    // chatモードではツールループをスキップ
-    if (!this.chatMode) {
+    // liteモードではツールループをスキップ
+    if (!this.liteMode) {
       // ツールループ: non-streaming の chat() でツール呼び出しを処理
       let toolRounds = 0;
       while (toolRounds < MAX_TOOL_ROUNDS) {
@@ -583,8 +657,8 @@ export class LocalLlmRunner implements AgentRunner {
   private buildSystemPrompt(): string {
     const parts: string[] = [];
 
-    // chatモードではXANGI_COMMANDS・CHAT_SYSTEM_PROMPT・スキル一覧を除外
-    if (!this.chatMode) {
+    // liteモードではXANGI_COMMANDS・CHAT_SYSTEM_PROMPT・スキル一覧を除外
+    if (!this.liteMode) {
       parts.push(CHAT_SYSTEM_PROMPT_PERSISTENT + '\n\n## XANGI_COMMANDS.md\n\n' + XANGI_COMMANDS);
     }
 
@@ -592,8 +666,17 @@ export class LocalLlmRunner implements AgentRunner {
     const context = loadWorkspaceContext(this.workdir);
     if (context) parts.push(context);
 
+    // liteモードでトリガーが存在する場合、利用可能なコマンド一覧を追加（毎回リロード）
+    if (this.liteMode) {
+      this.triggers = loadTriggers(this.workdir);
+    }
+    if (this.liteMode && this.triggers.length > 0) {
+      const triggersPrompt = buildTriggersPrompt(this.triggers);
+      if (triggersPrompt) parts.push(triggersPrompt);
+    }
+
     // スキル一覧と使い方 — agentモードのみ
-    if (!this.chatMode) {
+    if (!this.liteMode) {
       const skills = loadSkills(this.workdir);
       if (skills.length > 0) {
         const skillLines = skills
@@ -648,6 +731,43 @@ export class LocalLlmRunner implements AgentRunner {
       const removed = session.messages.shift();
       if (removed) totalChars -= removed.content.length;
     }
+  }
+
+  /**
+   * LLM応答テキストからトリガーを検出・実行する。
+   * マッチしたら結果文字列を返す。マッチなしは null。
+   */
+  private async processTriggers(
+    text: string,
+    channelId: string,
+    sessionId: string
+  ): Promise<string | null> {
+    // 毎回trigger.yamlを読み直す（再起動なしで変更反映）
+    this.triggers = this.liteMode ? loadTriggers(this.workdir) : [];
+    if (this.triggers.length === 0) return null;
+
+    const match = matchTrigger(text, this.triggers);
+    if (!match) return null;
+
+    console.log(
+      `[local-llm] Trigger matched: ${match.trigger.trigger} (args: ${match.args || '(none)'})`
+    );
+
+    const result = await executeTrigger(match.trigger, match.args, this.workdir);
+    if (result.success) {
+      console.log(
+        `[local-llm] Trigger ${match.trigger.name} completed (${result.output.length} chars)`
+      );
+    } else {
+      logError(
+        this.workdir,
+        channelId,
+        `Trigger ${match.trigger.name} failed: ${result.output}`,
+        sessionId
+      );
+    }
+
+    return result.output;
   }
 
   private cleanupSessions(): void {

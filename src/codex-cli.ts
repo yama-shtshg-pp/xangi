@@ -3,6 +3,7 @@ import { processManager } from './process-manager.js';
 import type { AgentRunner, RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { buildSystemPrompt, getSafeEnv } from './base-runner.js';
+import { getGitHubEnv } from './github-auth.js';
 import { logPrompt, logResponse } from './transcript-logger.js';
 
 export interface CodexOptions {
@@ -153,11 +154,12 @@ export class CodexRunner implements AgentRunner {
     args: string[],
     channelId?: string
   ): Promise<{ stdout: string; sessionId: string }> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
       const proc = spawn('codex', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: { ...safeEnv, ...getGitHubEnv(safeEnv) },
       });
       this.currentProcess = proc;
 
@@ -267,11 +269,12 @@ export class CodexRunner implements AgentRunner {
     callbacks: StreamCallbacks,
     channelId?: string
   ): Promise<RunResult> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
       const proc = spawn('codex', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: { ...safeEnv, ...getGitHubEnv(safeEnv) },
       });
       this.currentProcess = proc;
 

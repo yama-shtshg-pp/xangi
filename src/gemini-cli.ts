@@ -4,6 +4,7 @@ import type { AgentRunner, RunOptions, RunResult, StreamCallbacks } from './agen
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { getSafeEnv, buildSystemPrompt } from './base-runner.js';
 import type { BaseRunnerOptions } from './base-runner.js';
+import { getGitHubEnv } from './github-auth.js';
 import { logPrompt, logResponse } from './transcript-logger.js';
 
 /**
@@ -150,11 +151,12 @@ export class GeminiRunner implements AgentRunner {
     args: string[],
     channelId?: string
   ): Promise<{ stdout: string; sessionId: string }> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
       const proc = spawn('gemini', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: { ...safeEnv, ...getGitHubEnv(safeEnv) },
       });
       this.currentProcess = proc;
 
@@ -271,11 +273,12 @@ export class GeminiRunner implements AgentRunner {
     callbacks: StreamCallbacks,
     channelId?: string
   ): Promise<RunResult> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
       const proc = spawn('gemini', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: { ...safeEnv, ...getGitHubEnv(safeEnv) },
       });
       this.currentProcess = proc;
 

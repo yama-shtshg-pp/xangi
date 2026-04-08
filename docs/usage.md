@@ -405,23 +405,81 @@ Local LLMバックエンドでもトランスクリプトログ（`logs/transcri
 
 Docker実行については [Docker実行](#docker実行) セクションを参照してください。
 
-### チャットモード
+### liteモード
 
-tools非対応モデルや小型モデルを雑談ボットとして使いたい場合は、`LOCAL_LLM_MODE=chat` を設定します。
+tools非対応モデルや小型モデルを雑談ボットとして使いたい場合は、`LOCAL_LLM_MODE=lite` を設定します。
 
 ```bash
 # .env
-LOCAL_LLM_MODE=chat
+LOCAL_LLM_MODE=lite
 ```
 
-チャットモードでは以下が無効化されます：
+liteモードでは以下が無効化されます：
 
 - **tools送信** — Ollama APIにtoolsフィールドを送らないため、tools非対応モデルでも400エラーにならない
 - **スキル一覧** — システムプロンプトから除外
 - **XANGI_COMMANDS / CHAT_SYSTEM_PROMPT** — システムプロンプトから除外
 - **エージェントループ** — 1回のLLM呼び出しで完了（ツール実行なし）
 
-ワークスペースコンテキスト（AGENTS.md等）はチャットモードでも注入されます。
+ワークスペースコンテキスト（AGENTS.md等）はliteモードでも注入されます。
+
+### Triggers（liteモード拡張）
+
+liteモードでツールコール不可のモデルでも、LLMがテキストでマジックワード（`!コマンド名`）を出力するだけで機能を発動できる仕組みです。
+
+#### セットアップ
+
+ワークスペースに `triggers/` ディレクトリを作成し、コマンドごとにサブディレクトリを配置します。
+
+```
+workspace/
+  triggers/
+    weather/
+      trigger.yaml    # トリガー定義
+      handler.sh      # 実行スクリプト
+    search/
+      trigger.yaml
+      handler.sh
+```
+
+#### trigger.yaml フォーマット
+
+```yaml
+name: weather
+trigger: "!weather"
+description: "天気を調べる"
+handler: handler.sh
+feedback: true   # handler結果をLLMに戻してキャラに合った応答を生成
+```
+
+| フィールド | 必須 | 説明 |
+|-----------|------|------|
+| `name` | Yes | トリガー名 |
+| `trigger` | Yes | マジックワード（`!` で始まる） |
+| `description` | No | 説明（システムプロンプトに表示される） |
+| `handler` | Yes | 実行スクリプトのファイル名 |
+| `feedback` | No | `true`にするとhandler結果をLLMに戻して再応答（デフォルト: `false`） |
+
+#### handler の仕様
+
+- ワークスペースルートを `cwd` として `bash handler.sh [引数...]` で実行
+- 引数はトリガーワードの後のテキストをスペース区切りで渡す（例: `!weather 名古屋` → `bash handler.sh 名古屋`）
+- タイムアウト: `EXEC_TIMEOUT_MS`（デフォルト120秒）
+- `stdout` の内容がDiscordに送信される
+
+#### 動作フロー
+
+1. xangi起動時にワークスペースの `triggers/` をスキャン
+2. 利用可能なトリガー一覧がシステムプロンプトに追加される
+3. LLMの応答テキストにトリガーワードが含まれていたら handler を実行
+4. `feedback: false`（デフォルト）: handler の出力をそのままDiscordに送信
+5. `feedback: true`: handler の出力をLLMに戻して再応答。キャラクターに合った返答を生成
+
+#### 注意事項
+
+- **liteモード専用**。agentモードではtriggersは無視されます
+- トリガーはLLMの応答テキスト全体を行単位でスキャンします
+- 1つの応答で複数のトリガーがマッチした場合、最初にマッチしたものだけが実行されます
 
 ### マルチモーダル（画像入力）
 
@@ -523,12 +581,28 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `DATA_DIR` | データ保存ディレクトリ | `.xangi` |
 | `GH_TOKEN` | GitHub CLIトークン | - |
 
+### GitHub App認証（オプション）
+
+GitHub App設定があれば、`gh` CLI実行時にインストールトークンを自動生成。PATや `gh auth login` が不要に。
+
+| 変数 | 説明 |
+|------|------|
+| `GITHUB_APP_ID` | GitHub App ID |
+| `GITHUB_APP_INSTALLATION_ID` | インストールID |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | 秘密鍵ファイルパス |
+
+設定しなければ従来の `gh` 認証（`gh auth login` / `GH_TOKEN`）をそのまま使用。
+
+**Docker環境:** 秘密鍵は `/secrets/github-app.pem` に自動マウントされます。`.env` にはホスト側のパスを設定してください。
+
+**セキュリティ:** トークン生成に失敗した場合、PATへのフォールバックは行わずエラーになります。`gh` 実行時にツール表示に `🔑App` バッジが表示されます。
+
 ### Local LLM（`AGENT_BACKEND=local-llm` 時）
 
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
 | `LOCAL_LLM_BASE_URL` | LLMサーバーURL | `http://localhost:11434` |
-| `LOCAL_LLM_MODE` | 動作モード（`agent`: ツール実行あり / `chat`: チャットのみ） | `agent` |
+| `LOCAL_LLM_MODE` | 動作モード（`agent`: ツール実行あり / `lite`: トリガー+チャット） | `agent` |
 | `LOCAL_LLM_MODEL` | 使用するモデル名 | - |
 | `LOCAL_LLM_API_KEY` | APIキー（vLLM等で必要な場合） | - |
 | `LOCAL_LLM_THINKING` | Thinkingモデルの推論を有効にするか | `true` |

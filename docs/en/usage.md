@@ -407,6 +407,61 @@ The Local LLM backend also saves transcript logs (`logs/transcripts/`). Prompts,
 
 For Docker deployment, see the [Docker Deployment](#docker-deployment) section.
 
+### Triggers (Lite Mode Extension)
+
+Even in lite mode where tool calls are not available, LLMs can invoke functionality by outputting magic words (`!command`) in their response text.
+
+#### Setup
+
+Create a `triggers/` directory in your workspace with subdirectories for each command:
+
+```
+workspace/
+  triggers/
+    weather/
+      trigger.yaml    # Trigger definition
+      handler.sh      # Handler script
+    search/
+      trigger.yaml
+      handler.sh
+```
+
+#### trigger.yaml Format
+
+```yaml
+name: weather
+trigger: "!weather"
+description: "Check the weather"
+handler: handler.sh
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Trigger name |
+| `trigger` | Yes | Magic word (starts with `!`) |
+| `description` | No | Description (shown in system prompt) |
+| `handler` | Yes | Handler script filename |
+
+#### Handler Specification
+
+- Executed as `bash handler.sh [args...]` with workspace root as `cwd`
+- Arguments are passed as space-separated command line args (e.g., `!weather Tokyo` → `bash handler.sh Tokyo`)
+- Timeout: `EXEC_TIMEOUT_MS` (default 120 seconds)
+- `stdout` content is sent to Discord
+
+#### How It Works
+
+1. On startup, xangi scans the workspace `triggers/` directory
+2. Available triggers are added to the system prompt
+3. When the LLM response contains a trigger word, the handler is executed
+4. Handler output is sent to Discord
+
+#### Notes
+
+- **Chat mode only**. Triggers are ignored in agent mode
+- Triggers scan the entire LLM response text line by line
+- If multiple triggers match in one response, only the first match is executed
+
 ### Multimodal (Image Input)
 
 The Local LLM backend supports image input. When you send a message with an image attachment via Discord/Slack, the image content is passed to the LLM for analysis and description.
@@ -506,6 +561,22 @@ To modify the whitelist, edit `ALLOWED_ENV_KEYS` in `src/safe-env.ts`.
 | `IDLE_TIMEOUT_MS` | Auto-terminate idle processes after | `1800000` |
 | `DATA_DIR` | Data storage directory | `.xangi` |
 | `GH_TOKEN` | GitHub CLI token | - |
+
+### GitHub App Authentication (Optional)
+
+When GitHub App settings are configured, installation tokens are auto-generated on each `gh` CLI execution. No PAT or `gh auth login` needed.
+
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_APP_ID` | GitHub App ID |
+| `GITHUB_APP_INSTALLATION_ID` | Installation ID |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | Private key file path |
+
+Without these settings, existing `gh` authentication (`gh auth login` / `GH_TOKEN`) is used as-is.
+
+**Docker:** The private key is auto-mounted to `/secrets/github-app.pem`. Set the host-side path in `.env`.
+
+**Security:** If token generation fails, it does NOT fall back to PAT — it errors out. A `🔑App` badge appears in tool display when `gh` runs.
 
 ### Local LLM (when `AGENT_BACKEND=local-llm`)
 

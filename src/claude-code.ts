@@ -4,6 +4,7 @@ import type { RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { mergeTexts, sanitizeSurrogates } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { getSafeEnv } from './base-runner.js';
+import { getGitHubEnv } from './github-auth.js';
 import { buildSystemPrompt } from './base-runner.js';
 import type { ChatPlatform } from './prompts/index.js';
 import { logPrompt, logResponse } from './transcript-logger.js';
@@ -95,11 +96,12 @@ export class ClaudeCodeRunner {
   }
 
   private execute(args: string[], channelId?: string): Promise<string> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: { ...safeEnv, ...getGitHubEnv(safeEnv) },
       });
 
       // プロセスマネージャーに登録
@@ -200,11 +202,12 @@ export class ClaudeCodeRunner {
     callbacks: StreamCallbacks,
     channelId?: string
   ): Promise<RunResult> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: { ...safeEnv, ...getGitHubEnv(safeEnv) },
       });
 
       // プロセスマネージャーに登録

@@ -6,6 +6,7 @@ import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { getSafeEnv } from './base-runner.js';
 import { buildPersistentSystemPrompt } from './base-runner.js';
 import type { ChatPlatform } from './prompts/index.js';
+import { getGitHubEnv } from './github-auth.js';
 import { logPrompt, logResponse, logError } from './transcript-logger.js';
 
 /**
@@ -120,7 +121,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.process = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.workdir,
-      env: getSafeEnv(),
+      env: { ...getSafeEnv(), ...getGitHubEnv(getSafeEnv()) },
     });
     this.processAlive = true;
 
