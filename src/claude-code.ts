@@ -4,7 +4,9 @@ import type { RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { mergeTexts, sanitizeSurrogates } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { getSafeEnv } from './base-runner.js';
+import { getGitHubEnv } from './github-auth.js';
 import { buildSystemPrompt } from './base-runner.js';
+import type { ChatPlatform } from './prompts/index.js';
 import { logPrompt, logResponse } from './transcript-logger.js';
 
 export interface ClaudeCodeOptions {
@@ -12,6 +14,8 @@ export interface ClaudeCodeOptions {
   timeoutMs?: number;
   workdir?: string;
   skipPermissions?: boolean;
+  platform?: ChatPlatform;
+  effort?: string;
 }
 
 interface ClaudeCodeResponse {
@@ -33,13 +37,15 @@ export class ClaudeCodeRunner {
   private workdir?: string;
   private skipPermissions: boolean;
   private systemPrompt: string;
+  private effort?: string;
 
   constructor(options?: ClaudeCodeOptions) {
     this.model = options?.model;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS; // デフォルト5分
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-    this.systemPrompt = buildSystemPrompt();
+    this.systemPrompt = buildSystemPrompt(options?.platform);
+    this.effort = options?.effort;
   }
 
   async run(rawPrompt: string, options?: RunOptions): Promise<RunResult> {
@@ -60,6 +66,11 @@ export class ClaudeCodeRunner {
       args.push('--model', this.model);
     }
 
+    const effort = options?.effort ?? this.effort;
+    if (effort) {
+      args.push('--effort', effort);
+    }
+
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
     args.push('--append-system-prompt', this.systemPrompt);
 
@@ -71,16 +82,16 @@ export class ClaudeCodeRunner {
     console.log(`[claude-code] Executing in ${this.workdir || 'default dir'}${sessionInfo}`);
 
     // トランスクリプトログ: 送信プロンプトを記録
-    if (options?.channelId && this.workdir) {
-      logPrompt(this.workdir, options.channelId, prompt, options?.sessionId);
+    if (options?.appSessionId && this.workdir) {
+      logPrompt(this.workdir, options.appSessionId, prompt);
     }
 
     const result = await this.execute(args, options?.channelId);
     const response = this.parseResponse(result);
 
     // トランスクリプトログ: 応答を記録
-    if (options?.channelId && this.workdir) {
-      logResponse(this.workdir, options.channelId, {
+    if (options?.appSessionId && this.workdir) {
+      logResponse(this.workdir, options.appSessionId, {
         result: response.result,
         sessionId: response.session_id,
       });
@@ -93,11 +104,16 @@ export class ClaudeCodeRunner {
   }
 
   private execute(args: string[], channelId?: string): Promise<string> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
+      const childEnv = { ...safeEnv, ...getGitHubEnv(safeEnv) };
+      if (channelId) {
+        childEnv.XANGI_CHANNEL_ID = channelId;
+      }
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: childEnv,
       });
 
       // プロセスマネージャーに登録
@@ -180,6 +196,11 @@ export class ClaudeCodeRunner {
       args.push('--model', this.model);
     }
 
+    const effort = options?.effort ?? this.effort;
+    if (effort) {
+      args.push('--effort', effort);
+    }
+
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
     args.push('--append-system-prompt', this.systemPrompt);
 
@@ -198,11 +219,16 @@ export class ClaudeCodeRunner {
     callbacks: StreamCallbacks,
     channelId?: string
   ): Promise<RunResult> {
+    const safeEnv = getSafeEnv();
     return new Promise((resolve, reject) => {
+      const childEnv = { ...safeEnv, ...getGitHubEnv(safeEnv) };
+      if (channelId) {
+        childEnv.XANGI_CHANNEL_ID = channelId;
+      }
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: getSafeEnv(),
+        env: childEnv,
       });
 
       // プロセスマネージャーに登録
