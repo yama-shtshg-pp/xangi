@@ -13,6 +13,40 @@ import {
 } from './file-utils.js';
 import { loadSettings, saveSettings, formatSettings } from './settings.js';
 import { STREAM_UPDATE_INTERVAL_MS } from './constants.js';
+import type { KnownBlock } from '@slack/types';
+
+/** Slack Block Kit: Stopボタン */
+function createSlackStopBlocks(): KnownBlock[] {
+  return [
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Stop' },
+          action_id: 'xangi_stop',
+          style: 'danger',
+        },
+      ],
+    },
+  ];
+}
+
+/** Slack Block Kit: New Sessionボタン */
+function createSlackCompletedBlocks(): KnownBlock[] {
+  return [
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'New' },
+          action_id: 'xangi_new',
+        },
+      ],
+    },
+  ];
+}
 
 // セッション管理（チャンネルID → セッションID）
 const sessions = new Map<string, string>();
@@ -232,6 +266,53 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
     logLevel: LogLevel.INFO,
   });
 
+  // ボタンアクション: Stop
+  app.action('xangi_stop', async ({ ack, body }) => {
+    await ack();
+    const channelId = body.channel?.id;
+    if (!channelId) return;
+    const userId = body.user?.id;
+    if (
+      !config.slack.allowedUsers?.includes('*') &&
+      userId &&
+      !config.slack.allowedUsers?.includes(userId)
+    ) {
+      return;
+    }
+    const stopped = processManager.stop(channelId) || agentRunner.cancel?.(channelId) || false;
+    if (!stopped) {
+      console.log(`[slack] No running task to stop for channel ${channelId}`);
+    }
+  });
+
+  // ボタンアクション: New Session
+  app.action('xangi_new', async ({ ack, body, client: actionClient }) => {
+    await ack();
+    const channelId = body.channel?.id;
+    if (!channelId) return;
+    const userId = body.user?.id;
+    if (
+      !config.slack.allowedUsers?.includes('*') &&
+      userId &&
+      !config.slack.allowedUsers?.includes(userId)
+    ) {
+      return;
+    }
+    sessions.delete(channelId);
+    agentRunner.destroy?.(channelId);
+    // ボタンを消す
+    if ('message' in body && body.message) {
+      await actionClient.chat
+        .update({
+          channel: channelId,
+          ts: (body.message as { ts: string }).ts,
+          text: (body.message as { text?: string }).text || '✅',
+          blocks: [],
+        })
+        .catch(() => {});
+    }
+  });
+
   // メンション時の処理
   app.event('app_mention', async ({ event, say, client }) => {
     const userId = event.user;
@@ -326,6 +407,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       text?: string;
       channel: string;
       ts: string;
+      thread_ts?: string;
       channel_type?: string;
       files?: Array<{ url_private_download?: string; name?: string }>;
     };
@@ -334,17 +416,20 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       `[slack] Message event: channel=${messageEvent.channel}, type=${messageEvent.channel_type}, autoReplyChannels=${config.slack.autoReplyChannels?.join(',')}`
     );
 
-    // DM または autoReplyChannels のみ処理
+    // DM, autoReplyChannels, またはスレッド内返信を処理
     const isDM = messageEvent.channel_type === 'im';
     const isAutoReplyChannel = config.slack.autoReplyChannels?.includes(messageEvent.channel);
-    if (!isDM && !isAutoReplyChannel) {
-      console.log(`[slack] Skipping: isDM=${isDM}, isAutoReplyChannel=${isAutoReplyChannel}`);
+    const isThreadReply = !!messageEvent.thread_ts;
+    if (!isDM && !isAutoReplyChannel && !isThreadReply) {
+      console.log(
+        `[slack] Skipping: isDM=${isDM}, isAutoReplyChannel=${isAutoReplyChannel}, isThread=${isThreadReply}`
+      );
       return;
     }
 
     // autoReplyChannels でメンション付きメッセージは app_mention で処理済みなのでスキップ
     const textRaw = messageEvent.text || '';
-    if (isAutoReplyChannel && /<@[A-Z0-9]+>/i.test(textRaw)) {
+    if (isAutoReplyChannel && !isThreadReply && /<@[A-Z0-9]+>/i.test(textRaw)) {
       console.log(`[slack] Skipping mention in autoReplyChannel (handled by app_mention)`);
       return;
     }
@@ -587,6 +672,10 @@ async function processMessage(
     prompt = prompt.replace(/^!skip\s*/, '').trim();
   }
 
+  // プラットフォーム情報をプロンプトに注入
+  prompt = `[プラットフォーム: Slack]\n[チャンネル: ${channelId}]\n${prompt}`;
+
+  let messageTs = '';
   try {
     console.log(`[slack] Processing message in channel ${channelId}`);
 
@@ -594,14 +683,21 @@ async function processMessage(
     const useStreaming = config.slack.streaming ?? true;
     const showThinking = config.slack.showThinking ?? true;
 
-    // 最初のメッセージを送信
+    // 最初のメッセージを送信（Stopボタン付き）
+    const showButtons = config.slack.showThinking ?? true;
     const initialResponse = await client.chat.postMessage({
       channel: channelId,
       text: '🤔 考え中.',
       ...(threadTs && { thread_ts: threadTs }),
+      ...(showButtons && {
+        blocks: [
+          { type: 'section' as const, text: { type: 'mrkdwn' as const, text: '🤔 考え中.' } },
+          ...createSlackStopBlocks(),
+        ],
+      }),
     });
 
-    const messageTs = initialResponse.ts;
+    messageTs = initialResponse.ts ?? '';
     if (!messageTs) {
       throw new Error('Failed to get message timestamp');
     }
@@ -616,40 +712,72 @@ async function processMessage(
       // ストリーミング + 思考表示モード
       let lastUpdateTime = 0;
       let pendingUpdate = false;
+      let firstTextReceived = false;
 
-      const streamResult = await agentRunner.runStream(
-        prompt,
-        {
-          onText: (_chunk, fullText) => {
-            const now = Date.now();
-            if (now - lastUpdateTime >= STREAM_UPDATE_INTERVAL_MS && !pendingUpdate) {
-              pendingUpdate = true;
-              lastUpdateTime = now;
-              const streamText = sliceByBytes(fullText, SLACK_MAX_TEXT_BYTES - 10) + ' ▌';
-              const streamBytes = new TextEncoder().encode(streamText).length;
-              console.log(
-                `[slack] stream update: chars=${streamText.length}, bytes=${streamBytes}`
-              );
-              client.chat
-                .update({
-                  channel: channelId,
-                  ts: messageTs,
-                  text: streamText,
-                })
-                .catch((err) => {
-                  console.error(
-                    `[slack] Failed to update message (bytes=${streamBytes}):`,
-                    err.message
-                  );
-                })
-                .finally(() => {
-                  pendingUpdate = false;
-                });
-            }
+      // テキスト到着前の考え中アニメーション
+      let dotCount = 1;
+      const thinkingInterval = setInterval(() => {
+        if (firstTextReceived) return;
+        dotCount = (dotCount % 3) + 1;
+        const dots = '.'.repeat(dotCount);
+        const thinkingText = `🤔 考え中${dots}`;
+        client.chat
+          .update({
+            channel: channelId,
+            ts: messageTs,
+            text: thinkingText,
+            ...(showButtons && {
+              blocks: [
+                { type: 'section' as const, text: { type: 'mrkdwn' as const, text: thinkingText } },
+                ...createSlackStopBlocks(),
+              ],
+            }),
+          })
+          .catch(() => {});
+      }, 1000);
+
+      let streamResult: { result: string; sessionId: string };
+      try {
+        streamResult = await agentRunner.runStream(
+          prompt,
+          {
+            onText: (_chunk, fullText) => {
+              if (!firstTextReceived) {
+                firstTextReceived = true;
+                clearInterval(thinkingInterval);
+              }
+              const now = Date.now();
+              if (now - lastUpdateTime >= STREAM_UPDATE_INTERVAL_MS && !pendingUpdate) {
+                pendingUpdate = true;
+                lastUpdateTime = now;
+                const streamText = sliceByBytes(fullText, SLACK_MAX_TEXT_BYTES - 10) + ' ▌';
+                const streamBytes = new TextEncoder().encode(streamText).length;
+                console.log(
+                  `[slack] stream update: chars=${streamText.length}, bytes=${streamBytes}`
+                );
+                client.chat
+                  .update({
+                    channel: channelId,
+                    ts: messageTs,
+                    text: streamText,
+                  })
+                  .catch((err) => {
+                    console.error(
+                      `[slack] Failed to update message (bytes=${streamBytes}):`,
+                      err.message
+                    );
+                  })
+                  .finally(() => {
+                    pendingUpdate = false;
+                  });
+              }
+            },
           },
-        },
-        { skipPermissions, sessionId, channelId }
-      );
+          { skipPermissions, sessionId, channelId }
+        );
+      } finally {
+        clearInterval(thinkingInterval);
+      }
       result = streamResult.result;
       newSessionId = streamResult.sessionId;
     } else {
@@ -659,11 +787,18 @@ async function processMessage(
       const thinkingInterval = setInterval(() => {
         dotCount = (dotCount % 3) + 1;
         const dots = '.'.repeat(dotCount);
+        const thinkingText = `🤔 考え中${dots}`;
         client.chat
           .update({
             channel: channelId,
             ts: messageTs,
-            text: `🤔 考え中${dots}`,
+            text: thinkingText,
+            ...(showButtons && {
+              blocks: [
+                { type: 'section' as const, text: { type: 'mrkdwn' as const, text: thinkingText } },
+                ...createSlackStopBlocks(),
+              ],
+            }),
           })
           .catch(() => {});
       }, 1000);
@@ -693,6 +828,24 @@ async function processMessage(
     // 最終結果を更新（長い場合は分割送信）
     await sendSlackResult(client, channelId, messageTs, threadTs, displayText || '✅');
 
+    // 完了後: StopボタンをNewボタンに切り替え
+    if (showButtons) {
+      await client.chat
+        .update({
+          channel: channelId,
+          ts: messageTs,
+          text: sliceByBytes(displayText || '✅', SLACK_MAX_TEXT_BYTES),
+          blocks: [
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: sliceByBytes(displayText || '✅', 3000) },
+            },
+            ...createSlackCompletedBlocks(),
+          ],
+        })
+        .catch(() => {});
+    }
+
     if (filePaths.length > 0) {
       try {
         for (const fp of filePaths) {
@@ -715,12 +868,27 @@ async function processMessage(
       }
     }
   } catch (error) {
-    console.error('[slack] Error:', error);
-    await client.chat.postMessage({
-      channel: channelId,
-      text: 'エラーが発生しました',
-      ...(threadTs && { thread_ts: threadTs }),
-    });
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    if (errorMsg.includes('Request cancelled by user')) {
+      console.log('[slack] Request cancelled by user');
+      if (messageTs) {
+        await client.chat
+          .update({
+            channel: channelId,
+            ts: messageTs,
+            text: '🛑 停止しました',
+            blocks: [],
+          })
+          .catch(() => {});
+      }
+    } else {
+      console.error('[slack] Error:', error);
+      await client.chat.postMessage({
+        channel: channelId,
+        text: `エラーが発生しました: ${errorMsg.slice(0, 200)}`,
+        ...(threadTs && { thread_ts: threadTs }),
+      });
+    }
   } finally {
     // 👀 リアクションを削除
     await client.reactions

@@ -28,5 +28,6 @@ logs/
 # Workspace
 workspace/*
 !workspace/.gitkeep
+ai-assistant-workspace/
 .xangi/
 models/

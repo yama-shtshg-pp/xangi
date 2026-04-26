@@ -1,25 +1,33 @@
+**日本語** | [English](README.en.md)
+
 # xangi
 
 > **A**I **N**EON **G**ENESIS **I**NTELLIGENCE
 
-Claude Code / Codex / Gemini CLI / Local LLM（Ollama等）をバックエンドに、Discord から利用できる AI アシスタント。
+Claude Code / Codex / Gemini CLI / Local LLM をバックエンドに、Discord / Slack から利用できる AI アシスタント。Discord 推奨。
 
 ## Features
 
-- 🤖 マルチバックエンド対応（Claude Code / Codex / Gemini CLI / Local LLM）
-- 💬 Discord 対応
-- 👤 マルチユーザー対応（複数ユーザー許可 / 全員許可）
-- 🐳 Docker対応（コンテナ隔離環境）
-- 🔒 環境変数ホワイトリスト（AIにシークレットを渡さない）
-- 📚 スキルシステム（スラッシュコマンド対応）
-- 🐙 GitHub CLI（gh）対応
-- ⏰ スケジューラー機能（cron / 単発 / 起動時タスク）
-- 🚀 常駐プロセスモードで高速応答
-- 💾 セッション永続化（再起動後も会話継続）
+- マルチバックエンド対応（Claude Code / Codex / Gemini CLI / Local LLM）
+- `/backend` コマンドでチャンネルごとにバックエンド・モデル・effortを動的切り替え
+- Local LLM対応（Ollama/vLLM等、エージェントモード/チャットモード切替可能）
+- Discord / Slack / Web UI 対応
+- Docker対応
+- スキルシステム
+- スケジューラー（cron / 単発 / 起動時タスク）
+- セッション永続化
 
 ## アーキテクチャ
 
-![Architecture](docs/images/architecture.png)
+```mermaid
+graph LR
+    User --> |メッセージ| Chat[Chat Platform<br/>Discord / Slack]
+    Chat --> |プロンプト| xangi
+    xangi --> |実行| CLI[AI Backend<br/>Claude Code / Codex<br/>Gemini CLI / Local LLM]
+    CLI --> |ファイル操作| WS[Workspace<br/>skills / AGENTS.md]
+    xangi --> |定期実行| Scheduler
+    Scheduler --> |プロンプト| CLI
+```
 
 ## Quick Start
 
@@ -86,9 +94,12 @@ pm2 logs xangi     # ログ確認
 |----------|------|
 | `/new` | 新しいセッションを開始 |
 | `/clear` | セッション履歴をクリア |
+| `/stop` | 実行中のタスクを停止 |
 | `/settings` | 現在の設定を表示 |
-| `!schedule` | スケジューラー（定期実行・リマインダー） |
-| `!discord` | Discord操作（チャンネル送信・検索） |
+| `xangi-cmd schedule_*` | スケジューラー（定期実行・リマインダー） |
+| `xangi-cmd discord_*` | Discord操作（履歴取得・メッセージ送信・検索等） |
+
+応答メッセージにはボタン（Stop / New Session）が表示されます。`DISCORD_SHOW_BUTTONS=false` で非表示。
 
 詳細は [使い方ガイド](docs/usage.md) を参照してください。
 
@@ -183,7 +194,7 @@ xangi を使ったAIアシスタント構築のノウハウをまとめた書籍
 
 - [使い方ガイド](docs/usage.md) - Docker実行・環境変数・Local LLM・トラブルシューティング
 - [Discord セットアップ](docs/discord-setup.md) - Bot作成・ID確認方法
-- [Slack セットアップ](docs/slack-setup.md) - Slack連携（非推奨）
+- [Slack セットアップ](docs/slack-setup.md) - Slack連携
 - [設計ドキュメント](docs/design.md) - アーキテクチャ・設計思想・データフロー
 
 ## Acknowledgments

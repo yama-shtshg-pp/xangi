@@ -12,14 +12,23 @@ User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
 
 ## アーキテクチャ
 
-![Architecture](images/architecture.png)
+```mermaid
+graph LR
+    User --> |メッセージ| Chat[Chat Platform<br/>Discord / Slack]
+    Chat --> |プロンプト| xangi
+    xangi --> |実行| CLI[AI Backend<br/>Claude Code / Codex<br/>Gemini CLI / Local LLM]
+    CLI --> |ファイル操作| WS[Workspace<br/>skills / AGENTS.md]
+    xangi --> |定期実行| Scheduler
+    Scheduler --> |プロンプト| CLI
+```
 
 ### レイヤー構成
 
 | レイヤー | 役割 | 実装 |
 |----------|------|------|
 | Chat | ユーザーインターフェース | Discord.js, Slack Bolt |
-| xangi | AI CLIの統合・制御 | index.ts, agent-runner.ts |
+| xangi | AI CLIの統合・制御 | index.ts, agent-runner.ts, dynamic-runner.ts |
+| Backend Resolution | チャンネル別バックエンド解決 | backend-resolver.ts, settings.ts |
 | AI CLI | 実際のAI処理 | Claude Code, Codex CLI, Gemini CLI, Local LLM |
 | Workspace | ファイル・スキル | skills/, AGENTS.md |
 
@@ -33,7 +42,7 @@ User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
 - メッセージ受信とルーティング
 - AI CLIの呼び出し
 - スケジューラーの管理
-- コマンド処理（`!discord`, `!schedule` 等）
+- コマンド処理（`xangi-cmd` CLIツール経由 + テキストパース）
 
 ### エージェントランナー（agent-runner.ts）
 
@@ -46,12 +55,34 @@ interface AgentRunner {
 }
 ```
 
+### 動的ランナーマネージャー（dynamic-runner.ts）
+
+チャンネルごとにバックエンド・モデル・effortを動的に切り替えるラッパー：
+
+```
+メッセージ受信
+  → BackendResolver.resolve(channelId)
+  → { backend, model, effort } を取得
+  → DynamicRunnerManager が適切なランナーにルーティング
+  → 実行
+```
+
+BackendResolverの優先順位:
+1. `/backend set` で設定されたchannelOverrides（メモリ上、`.env`のCHANNEL_OVERRIDESに永続化）
+2. `.env` のデフォルト（`AGENT_BACKEND`, `AGENT_MODEL`）
+
 ### システムプロンプト（base-runner.ts）
 
 xangiがAI CLIに注入するシステムプロンプトを管理：
 
 - **チャットプラットフォーム情報** — Discord/Slack経由の会話であることを伝える短い固定テキスト
-- **XANGI_COMMANDS.md** — `prompts/XANGI_COMMANDS.md` からDiscord操作コマンド・スケジューラー等の仕様を読み込み
+- **XANGI_COMMANDS** — `src/prompts/` からプラットフォームに応じたコマンド仕様を注入
+  - 共通コマンド（`xangi-commands-common.ts`）: タイムアウト対策等
+  - チャットPF共通（`xangi-commands-chat-platform.ts`）: ファイル送信（MEDIA:）・セパレータ（===）・スケジュール・システムコマンド
+  - Discord専用（`xangi-commands-discord.ts`）: `xangi-cmd discord_*` CLIツール・自動展開
+  - Slack専用（`xangi-commands-slack.ts`）: Slack固有の操作
+  - プラットフォーム自動判別: Discordのみ有効なら Discord専用コマンドだけ注入（トークン節約）
+- **プラットフォーム識別** — 各メッセージに `[プラットフォーム: Discord]` or `[プラットフォーム: Slack]` を注入。AIが適切なコマンドを使い分け
 
 AGENTS.md / CHARACTER.md / USER.md 等のワークスペース設定は、各AI CLIの自動読み込み機能に委譲：
 
@@ -71,6 +102,46 @@ AGENTS.md / CHARACTER.md / USER.md 等のワークスペース設定は、各AI 
 | codex-cli.ts | Codex CLI | OpenAI製、0.98.0対応、cancel対応 |
 | gemini-cli.ts | Gemini CLI | Google製、セッション管理、ストリーミング対応 |
 | local-llm/runner.ts | Local LLM | Ollama等のローカルLLMを直接呼び出し、ツール実行・ストリーミング対応 |
+
+#### Local LLMアダプターの詳細設計
+
+**セッションリトライのフロー:**
+
+```
+1. ユーザーメッセージをセッション履歴に追加
+   ↓
+2. LLM APIにリクエスト送信
+   ↓
+3a. 成功 → ツールループ or 最終応答を返却
+3b. エラー発生
+   ↓
+4. isSessionRelatedError() でエラーを判定
+   - context length exceeded / too many tokens / max_tokens / context window
+   - invalid message / malformed / 400 / 422
+   ↓
+5a. セッション起因のエラー → セッションをクリア（最後のユーザーメッセージのみ保持）→ リトライ
+5b. セッション起因でない → formatLlmError() でユーザー向けメッセージを生成して返却
+   ↓
+6. リトライも失敗 → formatLlmError() でエラーメッセージを返却
+```
+
+**ツール呼び出しフロー（llm-client.ts）:**
+
+LLMクライアントはOllamaネイティブAPIとOpenAI互換APIの2経路を持つ。ツール呼び出し時のメッセージフォーマットが異なる点に注意:
+
+| 項目 | OpenAI互換API | Ollama ネイティブAPI |
+|------|---------------|---------------------|
+| assistantのツール呼び出し | `tool_calls[].id` で識別 | `tool_calls[].function` で識別 |
+| toolメッセージの関連付け | `tool_call_id`（ID指定） | `tool_name`（名前指定） |
+| 変換関数 | `toOpenAIMessages()` | `chatOllamaNative()` 内でインライン変換 |
+
+Ollamaネイティブ経由では `toolCallId` → `tool_name` の逆引きマップで関連付けを行う。
+
+**エラーハンドリングの設計:**
+
+- `isSessionRelatedError()` — Error インスタンスのメッセージを小文字化して、セッション履歴に起因する既知のパターンにマッチするか判定。非Errorオブジェクトは常にfalseを返す
+- `formatLlmError()` — 接続エラー・タイムアウト・認証エラー・レートリミット・サーバーエラーをそれぞれ日本語の分かりやすいメッセージに変換。非Errorオブジェクトにはデフォルトメッセージを返す
+- コンテキスト刈り込み（`trimSession()`）— ツール結果の切り詰め、メッセージ数制限（MAX_SESSION_MESSAGES）、合計文字数制限（CONTEXT_MAX_CHARS）を直近メッセージ保護付きで実行
 
 ### スケジューラー（scheduler.ts）
 
@@ -106,6 +177,29 @@ AGENTS.md / CHARACTER.md / USER.md 等のワークスペース設定は、各AI 
 - サーバーのシステムタイムゾーン（`TZ` 環境変数）に従う
 - Docker環境では `TZ=Asia/Tokyo` 等を設定推奨
 
+### Tool Server（tool-server.ts）
+
+AI CLIが xangi の機能（Discord操作・スケジュール・システム）を安全に呼び出すための HTTP API サーバー。
+
+```
+AI CLI（Claude Code等）
+  → xangi-cmd（シェルスクリプト）
+  → HTTP POST http://localhost:<port>/api/execute
+  → tool-server（xangiプロセス内）
+  → Discord REST API / スケジューラー / 設定
+```
+
+**ポート管理:**
+- ポート0でバインド（OS自動割り当て、複数インスタンスでも競合なし）
+- 起動したURLを `XANGI_TOOL_SERVER` として子プロセスへ注入
+- `xangi-cmd` は `XANGI_TOOL_SERVER` を使って接続
+- 現在のチャンネルIDなどの実行文脈は HTTP リクエストの `context` に載せて tool-server へ渡す
+
+**セキュリティ:**
+- DISCORD_TOKEN 等のシークレットは xangi プロセス内のみ
+- AI CLI には `safe-env.ts` のホワイトリストで安全な環境変数のみ渡す
+- Docker環境ではコンテナ分離により物理的にトークンへアクセス不可
+
 ### スキルシステム（skills.ts）
 
 ワークスペースの `skills/` ディレクトリからスキルを読み込み、スラッシュコマンドとして登録。
@@ -131,8 +225,6 @@ skills/
 3. 権限チェック（allowedUsers）
    ↓
 4. 特殊コマンド判定
-   - !discord → handleDiscordCommand()
-   - !schedule → handleScheduleMessage()
    - /command → スラッシュコマンド処理
    ↓
 5. チャンネル情報・発言者情報を付与
@@ -141,9 +233,8 @@ skills/
    ↓
 7. レスポンス処理
    - ストリーミング表示
-   - ファイル添付抽出
+   - ファイル添付抽出（MEDIA:パターン）
    - SYSTEM_COMMAND検出
-   - !discord / !schedule 検出・実行
    ↓
 8. ユーザーに返信
 ```
@@ -190,13 +281,16 @@ AGENT_BACKEND=claude-code  # or codex or gemini or local-llm
 
 AIが出力する特殊コマンドを検出して自動実行：
 
-| コマンド | 動作 |
-|----------|------|
-| `SYSTEM_COMMAND:restart` | プロセス再起動 |
-| `!discord send ...` | Discordメッセージ送信 |
-| `!schedule ...` | スケジュール操作 |
+| 方式 | コマンド例 | 動作 |
+|------|----------|------|
+| CLIツール | `xangi-cmd discord_send --channel ID --message "..."` | Discord操作 |
+| CLIツール | `xangi-cmd schedule_add --input "毎日 9:00 ..."` | スケジュール操作 |
+| CLIツール | `xangi-cmd system_restart` | プロセス再起動 |
+| テキストパース | `MEDIA:/path/to/file` | ファイル送信 |
+| テキストパース | `\n===\n` | メッセージ分割 |
 
-これにより、AIが自律的にシステムを操作可能。
+CLIツール（`xangi-cmd`）は xangi 内蔵の tool-server（HTTPエンドポイント）経由で実行される。
+DISCORD_TOKEN 等のシークレットは xangi プロセス内に閉じ込められ、AI CLI からはアクセスできない。
 
 ### 永続化戦略
 
@@ -204,26 +298,43 @@ AIが出力する特殊コマンドを検出して自動実行：
 |--------|--------|------|
 | スケジュール | `${DATA_DIR}/schedules.json` | JSON |
 | ランタイム設定 | `${WORKSPACE}/settings.json` | JSON |
-| セッション | `${DATA_DIR}/sessions.json` | JSON（チャンネルID→セッションID） |
-| トランスクリプト | `logs/transcripts/YYYY-MM-DD/{channelId}.jsonl` | JSONL（送信プロンプト・応答・エラー） |
+| セッション | `${DATA_DIR}/sessions.json` | JSON（appSessionId方式、activeByContext + sessions） |
+| トランスクリプト | `logs/sessions/{appSessionId}.jsonl` | JSONL（セッション単位の会話ログ） |
+
+### セッション管理
+
+xangi独自の `appSessionId` でセッションを管理。backendの `providerSessionId`（Claude Code等）は後付けで保存。
+
+**sessions.json の構造：**
+```json
+{
+  "activeByContext": { "<contextKey>": "<appSessionId>" },
+  "sessions": {
+    "<appSessionId>": {
+      "id": "<appSessionId>",
+      "title": "...",
+      "platform": "discord|slack|web",
+      "contextKey": "<channelId>",
+      "agent": { "backend": "claude-code", "providerSessionId": "..." }
+    }
+  }
+}
+```
 
 ### トランスクリプトログ
 
-チャンネルごとのAI会話ログをJSONL形式で自動保存する機能。デバッグ・障害分析に使用。
+セッション単位のAI会話ログをJSONL形式で自動保存。デバッグ・障害分析・WebUI閲覧に使用。
 
 **ディレクトリ構成：**
 ```
-logs/transcripts/
-  2026-03-08/
-    1469606785672417383.jsonl   # チャンネルごとのログ
-    1477591157423734785.jsonl
-  2026-03-09/
-    ...
+logs/sessions/
+  m4abc123_def456.jsonl   # セッション単位のログ
+  m4xyz789_ghi012.jsonl
 ```
 
 **記録される内容：**
-- `prompt`: ユーザーから送信されたプロンプト（タイムスタンプ・チャンネルトピック注入後）
-- `response`: Claude Code の最終応答（result メッセージ）
+- `user`: ユーザーから送信されたプロンプト
+- `assistant`: AI の最終応答
 - `error`: タイムアウト、API エラーなど
 
 **注意事項：**
@@ -234,23 +345,41 @@ logs/transcripts/
 ## ファイル構成
 
 ```
+bin/
+└── xangi-cmd           # CLIラッパー（シェルスクリプト、tool-serverに中継）
+
 src/
 ├── index.ts            # エントリーポイント、Discord統合
 ├── slack.ts            # Slack統合
 ├── agent-runner.ts     # AI CLIインターフェース
-├── base-runner.ts      # システムプロンプト生成、XANGI_COMMANDS.md読み込み
+├── base-runner.ts      # システムプロンプト生成
 ├── claude-code.ts      # Claude Codeアダプター（per-request）
 ├── persistent-runner.ts # Claude Codeアダプター（常駐プロセス）
 ├── codex-cli.ts        # Codex CLIアダプター
 ├── gemini-cli.ts       # Gemini CLIアダプター
+├── web-chat.ts         # WebチャットUI（HTTPサーバー）
+├── tool-server.ts      # Tool Server（AI CLI向けHTTP API）
+├── approval-server.ts  # 承認サーバー（危険コマンド検知・対話的承認）
+├── safe-env.ts         # 環境変数ホワイトリスト
+├── cli/                # CLIモジュール（tool-serverから呼ばれる）
+│   ├── discord-api.ts  #   Discord REST API直叩き
+│   ├── schedule-cmd.ts #   スケジュール操作
+│   ├── system-cmd.ts   #   システム操作
+│   └── xangi-cmd.ts    #   Node.js版CLIエントリーポイント
 ├── local-llm/          # Local LLMアダプター
 │   ├── runner.ts       #   メインランナー（セッション管理・ツール実行ループ）
 │   ├── llm-client.ts   #   LLM APIクライアント（Ollama native + OpenAI互換）
 │   ├── context.ts      #   ワークスペースコンテキスト読み込み
 │   ├── tools.ts        #   ビルトインツール（exec/read/web_fetch）
+│   ├── xangi-tools.ts  #   xangi専用ツール（function calling版）
 │   └── types.ts        #   型定義
+├── prompts/            # プロンプト定義
+│   ├── xangi-commands.ts          # プラットフォーム別組み立て
+│   ├── xangi-commands-common.ts   # 共通（タイムアウト等）
+│   ├── xangi-commands-chat-platform.ts # チャットPF共通（MEDIA:/スケジュール/システム）
+│   ├── xangi-commands-discord.ts  # Discord専用（xangi-cmd discord_*）
+│   └── xangi-commands-slack.ts    # Slack専用
 ├── scheduler.ts        # スケジューラー
-├── schedule-cli.ts     # スケジューラーCLI
 ├── skills.ts           # スキルローダー
 ├── config.ts           # 設定読み込み
 ├── settings.ts         # ランタイム設定
@@ -258,10 +387,7 @@ src/
 ├── file-utils.ts       # ファイル操作ユーティリティ
 ├── process-manager.ts  # プロセス管理
 ├── runner-manager.ts   # 複数チャンネル同時処理（RunnerManager）
-└── transcript-logger.ts # トランスクリプトログ
-
-prompts/
-└── XANGI_COMMANDS.md   # xangi専用コマンド仕様（AI CLIに注入）
+└── transcript-logger.ts # セッション単位トランスクリプトログ
 ```
 
 ## Docker構成
