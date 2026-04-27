@@ -31,6 +31,7 @@ import {
   buildPromptWithAttachments,
 } from './file-utils.js';
 import { initSettings, loadSettings, saveSettings, formatSettings } from './settings.js';
+import { classifyAgentError } from './error-classifier.js';
 import { DISCORD_MAX_LENGTH, DISCORD_SAFE_LENGTH, STREAM_UPDATE_INTERVAL_MS } from './constants.js';
 import {
   Scheduler,
@@ -1593,29 +1594,28 @@ async function processPrompt(
     }
     console.error('[xangi] Error:', error);
 
-    // エラーの種類を判別して詳細メッセージを生成
     const errorMsg = error instanceof Error ? error.message : String(error);
-    let errorDetail: string;
-    if (errorMsg.includes('timed out')) {
-      errorDetail = `⏱️ タイムアウトしました（${Math.round((config.agent.config.timeoutMs ?? 300000) / 1000)}秒）`;
-    } else if (errorMsg.includes('Process exited unexpectedly')) {
-      errorDetail = `💥 AIプロセスが予期せず終了しました: ${errorMsg}`;
-    } else if (errorMsg.includes('Circuit breaker')) {
-      errorDetail =
-        '🔌 AIプロセスが連続でクラッシュしたため一時停止中です。しばらくしてから再試行してください';
-    } else {
-      errorDetail = `❌ エラーが発生しました: ${errorMsg.slice(0, 200)}`;
+    const classified = classifyAgentError(errorMsg, config.agent.config.timeoutMs ?? 300000);
+
+    // 上限超過時はチャンネルのアクティブセッションを破棄しないと、
+    // 再 --resume で同じプロンプトを送り続けて永遠にエラーになる
+    if (classified.shouldResetSession) {
+      deleteSession(channelId);
+      agentRunner.destroy?.(channelId);
     }
 
     // エラー詳細を表示（途中のテキスト・ツール履歴を残す）
     const toolDisplay = toolHistory.length > 0 ? '\n' + toolHistory.join('\n') : '';
     const prefix = lastStreamedText ? lastStreamedText + '\n\n' : '';
-    const errorMessage = `${prefix}${errorDetail}${toolDisplay}`.slice(0, DISCORD_MAX_LENGTH);
+    const errorMessage = `${prefix}${classified.display}${toolDisplay}`.slice(
+      0,
+      DISCORD_MAX_LENGTH
+    );
     if (replyMessage) {
       // editだと通知が飛ばないので、タイムアウト時は新規replyで通知付き送信
       if (errorMsg.includes('timed out')) {
         await replyMessage.delete().catch(() => {});
-        await message.reply(errorDetail).catch(() => {});
+        await message.reply(classified.display).catch(() => {});
       } else {
         await replyMessage.edit({ content: errorMessage, components: [] }).catch(() => {});
       }
@@ -1623,10 +1623,8 @@ async function processPrompt(
       await message.reply(errorMessage).catch(() => {});
     }
 
-    // エラー後にエージェントへ自動フォローアップ（タイムアウト・サーキットブレーカー時は除く）
-    // タイムアウト時のフォローアップは壊れたセッションにさらに負荷をかけるだけで、
-    // 再びタイムアウト→Circuit breaker発動→チャンネルが長時間ロックされる原因になる
-    if (!errorMsg.includes('Circuit breaker') && !errorMsg.includes('timed out')) {
+    // 壊れたセッションへの自動フォローアップは状況を悪化させるだけなので種類別に抑制する
+    if (classified.shouldFollowUp) {
       try {
         console.log('[xangi] Sending error follow-up to agent');
         const sessionId = getSession(channelId);
