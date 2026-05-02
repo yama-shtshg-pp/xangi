@@ -137,12 +137,7 @@ export class DynamicRunnerManager implements AgentRunner {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
 
-    // ルーティング前段: claude-code かつ チャンネル側で opus 固定済みでないときに限り判定
-    // Why: /model set で opus 固定したチャンネルは persistent セッション継続が意図なので尊重する
-    const routed =
-      resolved.backend === 'claude-code' && resolved.model !== 'opus'
-        ? routeModel(prompt)
-        : undefined;
+    const routed = this.tryRouteModel(prompt, resolved);
     if (routed) {
       return this.runWithRoutedModel(prompt, routed, resolved.effort, options);
     }
@@ -166,10 +161,7 @@ export class DynamicRunnerManager implements AgentRunner {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
 
-    const routed =
-      resolved.backend === 'claude-code' && resolved.model !== 'opus'
-        ? routeModel(prompt)
-        : undefined;
+    const routed = this.tryRouteModel(prompt, resolved);
     if (routed) {
       return this.runStreamWithRoutedModel(prompt, callbacks, routed, resolved.effort, options);
     }
@@ -243,6 +235,23 @@ export class DynamicRunnerManager implements AgentRunner {
       result: result.result,
       sessionId: protectedSessionId,
     };
+  }
+
+  /**
+   * ルーティング判定（前段）。
+   *
+   * 適用条件:
+   * - claude-code バックエンド限定
+   * - チャンネル側の resolved.model が opus 系でない
+   *   （`opus` 短縮形・`claude-opus-*` フル ID の双方を弾くため部分一致）
+   *
+   * Why: /model set で opus 固定したチャンネルは persistent セッション継続が意図。
+   * 既に opus で走っているチャンネルを ad-hoc 経路へ迂回させると文脈が失われる。
+   */
+  private tryRouteModel(prompt: string, resolved: ResolvedBackend): RoutedModel | undefined {
+    if (resolved.backend !== 'claude-code') return undefined;
+    if (resolved.model?.toLowerCase().includes('opus')) return undefined;
+    return routeModel(prompt);
   }
 
   private createAdhocClaudeCodeRunner(model: RoutedModel): ClaudeCodeRunner {
