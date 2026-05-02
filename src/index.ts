@@ -1176,7 +1176,11 @@ async function main() {
           } else {
             errorDetail = `❌ エラー: ${errorMsg.slice(0, 200)}`;
           }
-          await thinkingMsg.edit(errorDetail);
+          // editだと通知が飛ばないので新規送信
+          await thinkingMsg.delete().catch(() => {});
+          await (channel as { send: (content: string) => Promise<unknown> })
+            .send(errorDetail)
+            .catch(() => {});
         }
         throw error;
       }
@@ -1605,6 +1609,7 @@ async function processPrompt(
     }
 
     // エラー詳細を表示（途中のテキスト・ツール履歴を残す）
+    // editだと通知が飛ばないので、全エラー系で delete + 新規 reply に統一して通知付き送信
     const toolDisplay = toolHistory.length > 0 ? '\n' + toolHistory.join('\n') : '';
     const prefix = lastStreamedText ? lastStreamedText + '\n\n' : '';
     const errorMessage = `${prefix}${classified.display}${toolDisplay}`.slice(
@@ -1612,16 +1617,9 @@ async function processPrompt(
       DISCORD_MAX_LENGTH
     );
     if (replyMessage) {
-      // editだと通知が飛ばないので、タイムアウト時は新規replyで通知付き送信
-      if (errorMsg.includes('timed out')) {
-        await replyMessage.delete().catch(() => {});
-        await message.reply(classified.display).catch(() => {});
-      } else {
-        await replyMessage.edit({ content: errorMessage, components: [] }).catch(() => {});
-      }
-    } else {
-      await message.reply(errorMessage).catch(() => {});
+      await replyMessage.delete().catch(() => {});
     }
+    await message.reply(errorMessage).catch(() => {});
 
     // 壊れたセッションへの自動フォローアップは状況を悪化させるだけなので種類別に抑制する
     if (classified.shouldFollowUp) {
