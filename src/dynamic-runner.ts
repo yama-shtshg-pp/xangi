@@ -242,17 +242,20 @@ export class DynamicRunnerManager implements AgentRunner {
    *
    * 適用条件:
    * - claude-code バックエンド限定
-   * - チャンネル側の resolved.model が opus 系でない
+   * - 実効 model が opus 系でない
    *   （`opus` 短縮形・`claude-opus-*` フル ID の双方を弾くため部分一致）
    * - 振り分け先 model が ALLOWED_MODELS で許可されている
    *   （管理者がコスト制御で禁止したモデルへの迂回を防ぐ）
    *
    * Why: /model set で opus 固定したチャンネルは persistent セッション継続が意図。
    * 既に opus で走っているチャンネルを ad-hoc 経路へ迂回させると文脈が失われる。
+   * resolved.model が undefined のとき（backend-only override 等）は AGENT_MODEL に
+   * フォールバックするため、createRunnerFor() と同じ解決順で実効 model を判定する。
    */
   private tryRouteModel(prompt: string, resolved: ResolvedBackend): RoutedModel | undefined {
     if (resolved.backend !== 'claude-code') return undefined;
-    if (resolved.model?.toLowerCase().includes('opus')) return undefined;
+    const effectiveModel = resolved.model ?? this.config.agent.config.model;
+    if (effectiveModel?.toLowerCase().includes('opus')) return undefined;
     const model = routeModel(prompt);
     if (!model) return undefined;
     if (!this.resolver.isModelAllowed(model)) return undefined;
