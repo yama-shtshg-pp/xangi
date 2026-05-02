@@ -137,7 +137,7 @@ export class DynamicRunnerManager implements AgentRunner {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
 
-    const routed = this.tryRouteModel(prompt, resolved);
+    const routed = this.tryRouteModel(prompt, resolved, options);
     if (routed) {
       return this.runWithRoutedModel(prompt, routed, resolved.effort, options);
     }
@@ -161,7 +161,7 @@ export class DynamicRunnerManager implements AgentRunner {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
 
-    const routed = this.tryRouteModel(prompt, resolved);
+    const routed = this.tryRouteModel(prompt, resolved, options);
     if (routed) {
       return this.runStreamWithRoutedModel(prompt, callbacks, routed, resolved.effort, options);
     }
@@ -241,6 +241,8 @@ export class DynamicRunnerManager implements AgentRunner {
    * ルーティング判定（前段）。
    *
    * 適用条件:
+   * - 呼び出し元が skipRouting を指定していない
+   *   （自動エラーフォローアップ等、既存セッションでの続報を保証したいケース）
    * - claude-code バックエンド限定
    * - 実効 model が opus 系でない
    *   （`opus` 短縮形・`claude-opus-*` フル ID の双方を弾くため部分一致）
@@ -252,7 +254,12 @@ export class DynamicRunnerManager implements AgentRunner {
    * resolved.model が undefined のとき（backend-only override 等）は AGENT_MODEL に
    * フォールバックするため、createRunnerFor() と同じ解決順で実効 model を判定する。
    */
-  private tryRouteModel(prompt: string, resolved: ResolvedBackend): RoutedModel | undefined {
+  private tryRouteModel(
+    prompt: string,
+    resolved: ResolvedBackend,
+    options?: RunOptions
+  ): RoutedModel | undefined {
+    if (options?.skipRouting) return undefined;
     if (resolved.backend !== 'claude-code') return undefined;
     const effectiveModel = resolved.model ?? this.config.agent.config.model;
     if (effectiveModel?.toLowerCase().includes('opus')) return undefined;

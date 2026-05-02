@@ -1637,6 +1637,9 @@ async function processPrompt(
             sessionId,
             channelId,
             appSessionId: followUpAppId,
+            // ルーティング層が「エラー」を含む follow-up を ad-hoc Opus へ迂回させると
+            // sessionId が破棄されて元セッションの作業文脈が失われるため明示的にスキップ
+            skipRouting: true,
           });
           if (followUpResult.result) {
             setSession(channelId, followUpResult.sessionId);
