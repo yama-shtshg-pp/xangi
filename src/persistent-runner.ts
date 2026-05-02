@@ -5,6 +5,8 @@ import { mergeTexts, sanitizeSurrogates } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { getSafeEnv } from './base-runner.js';
 import { buildPersistentSystemPrompt } from './base-runner.js';
+import type { ChatPlatform } from './prompts/index.js';
+import { getGitHubEnv } from './github-auth.js';
 import { logPrompt, logResponse, logError } from './transcript-logger.js';
 
 /**
@@ -47,6 +49,8 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   private systemPrompt: string;
   private resumeSessionId?: string; // プロセス再起動時に --resume で復元するセッションID
   private channelId?: string; // トランスクリプトログ用
+  private appSessionId?: string; // xangi側のセッションID
+  private effort?: string; // Claude Code の --effort オプション
 
   constructor(options?: {
     model?: string;
@@ -54,14 +58,24 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     workdir?: string;
     skipPermissions?: boolean;
     channelId?: string;
+    platform?: ChatPlatform;
+    effort?: string;
   }) {
     super();
     this.model = options?.model;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-    this.systemPrompt = buildPersistentSystemPrompt();
+    this.systemPrompt = buildPersistentSystemPrompt(options?.platform);
     this.channelId = options?.channelId;
+    this.effort = options?.effort;
+  }
+
+  /**
+   * appSessionIdを設定（外部から呼ぶ）
+   */
+  setAppSessionId(appSessionId: string): void {
+    this.appSessionId = appSessionId;
   }
 
   /**
@@ -104,6 +118,10 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
       args.push('--model', this.model);
     }
 
+    if (this.effort) {
+      args.push('--effort', this.effort);
+    }
+
     // セッション復元: 保存済みセッションIDがあれば --resume で継続
     const resumeId = this.resumeSessionId || this.sessionId;
     if (resumeId) {
@@ -118,7 +136,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.process = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.workdir,
-      env: getSafeEnv(),
+      env: { ...getSafeEnv(), ...getGitHubEnv(getSafeEnv()) },
     });
     this.processAlive = true;
 
@@ -227,7 +245,14 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   private handleJsonMessage(json: {
     type: string;
     session_id?: string;
-    message?: { content?: Array<{ type: string; text?: string }> };
+    message?: {
+      content?: Array<{
+        type: string;
+        text?: string;
+        name?: string;
+        input?: Record<string, unknown>;
+      }>;
+    };
     result?: string;
     is_error?: boolean;
   }): void {
@@ -242,6 +267,9 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
           this.fullText += block.text;
           this.currentItem?.callbacks?.onText?.(block.text, this.fullText);
         }
+        if (block.type === 'tool_use' && block.name) {
+          this.currentItem?.callbacks?.onToolUse?.(block.name, block.input ?? {});
+        }
       }
     }
 
@@ -250,12 +278,18 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
         this.sessionId = json.session_id;
       }
 
+      // providerSessionIdをemit（sessions.tsへの後付け保存用）
+      if (json.session_id) {
+        this.emit('provider-session-id', json.session_id);
+      }
+
       // トランスクリプトログ: 最終結果を記録
-      if (this.channelId && this.workdir) {
+      const resultAppSessionId = this.currentItem?.options?.appSessionId || this.appSessionId;
+      if (resultAppSessionId && this.workdir) {
         if (json.is_error) {
-          logError(this.workdir, this.channelId, json.result || 'Unknown error', this.sessionId);
+          logError(this.workdir, resultAppSessionId, json.result || 'Unknown error');
         } else {
-          logResponse(this.workdir, this.channelId, json as Record<string, unknown>);
+          logResponse(this.workdir, resultAppSessionId, json as Record<string, unknown>);
         }
       }
 
@@ -348,9 +382,12 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
 
     console.log(`[persistent-runner] Sending request (queue: ${this.queue.length} remaining)`);
 
+    // appSessionIdはリクエストのoptionsから取得（/new時に変わるため）
+    const reqAppSessionId = this.currentItem.options?.appSessionId || this.appSessionId;
+
     // トランスクリプトログ: 送信プロンプトを記録
-    if (this.channelId && this.workdir) {
-      logPrompt(this.workdir, this.channelId, this.currentItem.prompt, this.sessionId || undefined);
+    if (reqAppSessionId && this.workdir) {
+      logPrompt(this.workdir, reqAppSessionId, this.currentItem.prompt);
     }
 
     proc.stdin?.write(JSON.stringify(message) + '\n');

@@ -1,4 +1,4 @@
-import type { AgentBackend, AgentConfig } from './config.js';
+import type { AgentBackend, AgentConfig, EffortLevel } from './config.js';
 import { ClaudeCodeRunner } from './claude-code.js';
 import { CodexRunner } from './codex-cli.js';
 import { GeminiRunner } from './gemini-cli.js';
@@ -9,6 +9,15 @@ export interface RunOptions {
   skipPermissions?: boolean;
   sessionId?: string;
   channelId?: string; // プロセス管理用
+  appSessionId?: string; // xangi側セッションID（ログ用）
+  effort?: EffortLevel; // Claude Code の --effort オプション
+  /**
+   * dynamic-runner のルーティング前段（regex で model を切り替える層）をスキップする。
+   * 既存セッションの文脈で続報を取りたい呼び出し（自動エラーフォローアップ等）で
+   * 使う。プロンプトに「エラー」等が含まれて router が発火し、ad-hoc / no-session
+   * 経路へ迂回して元セッションが見えなくなるのを防ぐ。
+   */
+  skipRouting?: boolean;
 }
 
 export interface RunResult {
@@ -18,6 +27,7 @@ export interface RunResult {
 
 export interface StreamCallbacks {
   onText?: (text: string, fullText: string) => void;
+  onToolUse?: (toolName: string, toolInput: Record<string, unknown>) => void;
   onComplete?: (result: RunResult) => void;
   onError?: (error: Error) => void;
 }
@@ -37,7 +47,11 @@ export interface AgentRunner {
 /**
  * 設定に基づいてAgentRunnerを作成
  */
-export function createAgentRunner(backend: AgentBackend, config: AgentConfig): AgentRunner {
+export function createAgentRunner(
+  backend: AgentBackend,
+  config: AgentConfig,
+  options?: { platform?: import('./prompts/index.js').ChatPlatform }
+): AgentRunner {
   switch (backend) {
     case 'claude-code':
       // persistent モードなら RunnerManager を使用（複数チャンネル同時処理）
@@ -46,9 +60,10 @@ export function createAgentRunner(backend: AgentBackend, config: AgentConfig): A
         return new RunnerManager(config, {
           maxProcesses: config.maxProcesses,
           idleTimeoutMs: config.idleTimeoutMs,
+          platform: options?.platform,
         });
       }
-      return new ClaudeCodeRunner(config);
+      return new ClaudeCodeRunner({ ...config, platform: options?.platform });
     case 'codex':
       return new CodexRunner(config);
     case 'gemini':

@@ -17,6 +17,11 @@ async function shellExec(
   return execAsync(command, options);
 }
 
+// --- Configurable timeouts ---
+
+const EXEC_TIMEOUT_MS = parseInt(process.env.EXEC_TIMEOUT_MS ?? '120000', 10);
+const WEB_FETCH_TIMEOUT_MS = parseInt(process.env.WEB_FETCH_TIMEOUT_MS ?? '15000', 10);
+
 // --- exec tool ---
 
 const BLOCKED_PATTERNS = [
@@ -54,7 +59,7 @@ const execToolHandler: ToolHandler = {
     try {
       const { stdout, stderr } = await shellExec(command, {
         cwd,
-        timeout: 30_000,
+        timeout: EXEC_TIMEOUT_MS,
         maxBuffer: 1024 * 1024,
         env: getSafeEnv(),
       });
@@ -145,7 +150,7 @@ const webFetchToolHandler: ToolHandler = {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15_000);
+    const timeoutId = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT_MS);
 
     try {
       const opts: RequestInit = {
@@ -182,8 +187,25 @@ const webFetchToolHandler: ToolHandler = {
 
 const ALL_TOOLS: ToolHandler[] = [execToolHandler, readToolHandler, webFetchToolHandler];
 
+// 動的に追加されたツール（トリガー由来等）
+let dynamicTools: ToolHandler[] = [];
+
 export function getBuiltinTools(): ToolHandler[] {
   return ALL_TOOLS;
+}
+
+/**
+ * 動的ツールを登録する（トリガーのツール化等）
+ */
+export function registerDynamicTools(tools: ToolHandler[]): void {
+  dynamicTools = tools;
+}
+
+/**
+ * 全ツール（ビルトイン + 動的）を取得
+ */
+export function getAllTools(): ToolHandler[] {
+  return [...ALL_TOOLS, ...dynamicTools];
 }
 
 export function toLLMTools(handlers: ToolHandler[]): LLMTool[] {
@@ -199,7 +221,8 @@ export async function executeTool(
   args: Record<string, unknown>,
   context: ToolContext
 ): Promise<ToolResult> {
-  const handler = ALL_TOOLS.find((t) => t.name === name);
+  const allTools = getAllTools();
+  const handler = allTools.find((t) => t.name === name);
   if (!handler) return { success: false, output: '', error: `Unknown tool: ${name}` };
 
   try {

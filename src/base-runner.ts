@@ -2,7 +2,11 @@ import {
   CHAT_SYSTEM_PROMPT_RESUME,
   CHAT_SYSTEM_PROMPT_PERSISTENT,
   XANGI_COMMANDS,
+  buildXangiCommands,
+  buildChatSystemResume,
+  buildChatSystemPersistent,
 } from './prompts/index.js';
+import type { ChatPlatform } from './prompts/index.js';
 
 /**
  * ランナー共通の設定
@@ -20,15 +24,19 @@ export { CHAT_SYSTEM_PROMPT_RESUME, CHAT_SYSTEM_PROMPT_PERSISTENT };
 /**
  * 完全なシステムプロンプトを生成（resume型ランナー用）
  */
-export function buildSystemPrompt(): string {
-  return CHAT_SYSTEM_PROMPT_RESUME + '\n\n## XANGI_COMMANDS.md\n\n' + XANGI_COMMANDS;
+export function buildSystemPrompt(platform?: ChatPlatform): string {
+  const systemPrompt = buildChatSystemResume(platform);
+  const commands = buildXangiCommands(platform);
+  return systemPrompt + '\n\n## XANGI_COMMANDS\n\n' + commands;
 }
 
 /**
  * 完全なシステムプロンプトを生成（常駐プロセス用）
  */
-export function buildPersistentSystemPrompt(): string {
-  return CHAT_SYSTEM_PROMPT_PERSISTENT + '\n\n## XANGI_COMMANDS.md\n\n' + XANGI_COMMANDS;
+export function buildPersistentSystemPrompt(platform?: ChatPlatform): string {
+  const systemPrompt = buildChatSystemPersistent(platform);
+  const commands = buildXangiCommands(platform);
+  return systemPrompt + '\n\n## XANGI_COMMANDS\n\n' + commands;
 }
 
 // XANGI_COMMANDSを再エクスポート（local-llm runner等から使う）

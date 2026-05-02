@@ -1,6 +1,7 @@
 import { PersistentRunner } from './persistent-runner.js';
 import type { AgentRunner, RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import type { AgentConfig } from './config.js';
+import type { ChatPlatform } from './prompts/index.js';
 import { deleteSession } from './sessions.js';
 
 /**
@@ -23,6 +24,8 @@ export class RunnerManager implements AgentRunner {
   private idleTimeoutMs: number;
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   private agentConfig: AgentConfig;
+  private platform?: ChatPlatform;
+  private effort?: string;
 
   /** デフォルトのチャンネルID（channelIdが未指定の場合に使用） */
   private static readonly DEFAULT_CHANNEL = '__default__';
@@ -34,9 +37,13 @@ export class RunnerManager implements AgentRunner {
     options?: {
       maxProcesses?: number;
       idleTimeoutMs?: number;
+      platform?: ChatPlatform;
+      effort?: string;
     }
   ) {
     this.agentConfig = agentConfig;
+    this.platform = options?.platform;
+    this.effort = options?.effort;
     this.maxProcesses = options?.maxProcesses ?? 10;
     this.idleTimeoutMs = options?.idleTimeoutMs ?? 30 * 60 * 1000; // 30分
 
@@ -64,7 +71,14 @@ export class RunnerManager implements AgentRunner {
     }
 
     // 新しい PersistentRunner を作成
-    const runner = new PersistentRunner({ ...this.agentConfig, channelId });
+    // web-chatチャンネルはWeb用のシステムプロンプトを使用
+    const runnerPlatform = channelId === 'web-chat' ? ('web' as const) : this.platform;
+    const runner = new PersistentRunner({
+      ...this.agentConfig,
+      channelId,
+      platform: runnerPlatform,
+      effort: this.effort,
+    });
 
     // セッション無効化イベント: sessions.json からも削除して永続的にリセット
     runner.on('session-invalidated', (ch: string, oldSessionId: string) => {
