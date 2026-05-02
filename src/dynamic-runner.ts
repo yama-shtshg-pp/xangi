@@ -1,10 +1,12 @@
 import type { AgentRunner, RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { createAgentRunner, getBackendDisplayName } from './agent-runner.js';
-import type { AgentConfig, Config } from './config.js';
+import type { AgentConfig, Config, EffortLevel } from './config.js';
 import { BackendResolver, type ResolvedBackend } from './backend-resolver.js';
 import { RunnerManager } from './runner-manager.js';
+import { ClaudeCodeRunner } from './claude-code.js';
 import { deleteSession } from './sessions.js';
 import type { ChatPlatform } from './prompts/index.js';
+import { routeModel, type RoutedModel } from './router.js';
 
 /**
  * チャンネルごとにバックエンドを動的に切り替えるランナーマネージャー
@@ -134,6 +136,12 @@ export class DynamicRunnerManager implements AgentRunner {
   async run(prompt: string, options?: RunOptions): Promise<RunResult> {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
+
+    const routed = this.tryRouteModel(prompt, resolved, options);
+    if (routed) {
+      return this.runWithRoutedModel(prompt, routed, resolved.effort, options);
+    }
+
     const runner = this.getRunner(channelId, resolved);
 
     // effort をオプションに注入（per-request型のclaude-codeで使用）
@@ -152,11 +160,122 @@ export class DynamicRunnerManager implements AgentRunner {
   ): Promise<RunResult> {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
+
+    const routed = this.tryRouteModel(prompt, resolved, options);
+    if (routed) {
+      return this.runStreamWithRoutedModel(prompt, callbacks, routed, resolved.effort, options);
+    }
+
     const runner = this.getRunner(channelId, resolved);
 
     const runOptions = resolved.effort ? { ...options, effort: resolved.effort } : options;
 
     return runner.runStream(prompt, callbacks, runOptions);
+  }
+
+  /**
+   * ルーティングで上書きされた model を ad-hoc な ClaudeCodeRunner で実行する。
+   *
+   * Why: persistent runner はプロセス起動時に model 固定で立ち上がるため、
+   * メッセージ単位で model を切り替えるには毎回 spawn するしかない。
+   * 本流チャンネルの session を汚さないよう sessionId は新規発行し、
+   * 戻り値の sessionId は呼び出し元から渡された値で上書きする。
+   * effort はチャンネル override（resolved.effort）を引き継いで一貫性を保つ。
+   */
+  private async runWithRoutedModel(
+    prompt: string,
+    model: RoutedModel,
+    effort: EffortLevel | undefined,
+    options?: RunOptions
+  ): Promise<RunResult> {
+    const runner = this.createAdhocClaudeCodeRunner(model);
+    const adhocOptions: RunOptions = {
+      ...options,
+      sessionId: undefined,
+      effort: effort ?? options?.effort,
+    };
+    console.log(`[dynamic-runner] Routed to ${model} (ad-hoc, no session)`);
+    const result = await runner.run(prompt, adhocOptions);
+    return {
+      result: result.result,
+      sessionId: options?.sessionId ?? '',
+    };
+  }
+
+  private async runStreamWithRoutedModel(
+    prompt: string,
+    callbacks: StreamCallbacks,
+    model: RoutedModel,
+    effort: EffortLevel | undefined,
+    options?: RunOptions
+  ): Promise<RunResult> {
+    const runner = this.createAdhocClaudeCodeRunner(model);
+    const adhocOptions: RunOptions = {
+      ...options,
+      sessionId: undefined,
+      effort: effort ?? options?.effort,
+    };
+    // 本流セッション保護: ad-hoc 実行で発火する onComplete の sessionId も
+    // 呼び出し元の sessionId に置換する（web-chat 等の永続化先で本流が上書きされるのを防ぐ）
+    const protectedSessionId = options?.sessionId ?? '';
+    const onComplete = callbacks.onComplete;
+    const wrappedCallbacks: StreamCallbacks = {
+      ...callbacks,
+      onComplete: onComplete
+        ? (result: RunResult) =>
+            onComplete({
+              result: result.result,
+              sessionId: protectedSessionId,
+            })
+        : undefined,
+    };
+    console.log(`[dynamic-runner] Routed to ${model} (ad-hoc stream, no session)`);
+    const result = await runner.runStream(prompt, wrappedCallbacks, adhocOptions);
+    return {
+      result: result.result,
+      sessionId: protectedSessionId,
+    };
+  }
+
+  /**
+   * ルーティング判定（前段）。
+   *
+   * 適用条件:
+   * - 呼び出し元が skipRouting を指定していない
+   *   （自動エラーフォローアップ等、既存セッションでの続報を保証したいケース）
+   * - claude-code バックエンド限定
+   * - 実効 model が opus 系でない
+   *   （`opus` 短縮形・`claude-opus-*` フル ID の双方を弾くため部分一致）
+   * - 振り分け先 model が ALLOWED_MODELS で許可されている
+   *   （管理者がコスト制御で禁止したモデルへの迂回を防ぐ）
+   *
+   * Why: /model set で opus 固定したチャンネルは persistent セッション継続が意図。
+   * 既に opus で走っているチャンネルを ad-hoc 経路へ迂回させると文脈が失われる。
+   * resolved.model が undefined のとき（backend-only override 等）は AGENT_MODEL に
+   * フォールバックするため、createRunnerFor() と同じ解決順で実効 model を判定する。
+   */
+  private tryRouteModel(
+    prompt: string,
+    resolved: ResolvedBackend,
+    options?: RunOptions
+  ): RoutedModel | undefined {
+    if (options?.skipRouting) return undefined;
+    if (resolved.backend !== 'claude-code') return undefined;
+    const effectiveModel = resolved.model ?? this.config.agent.config.model;
+    if (effectiveModel?.toLowerCase().includes('opus')) return undefined;
+    const model = routeModel(prompt);
+    if (!model) return undefined;
+    if (!this.resolver.isModelAllowed(model)) return undefined;
+    return model;
+  }
+
+  private createAdhocClaudeCodeRunner(model: RoutedModel): ClaudeCodeRunner {
+    const adhocConfig: AgentConfig = {
+      ...this.config.agent.config,
+      model,
+      persistent: false,
+    };
+    return new ClaudeCodeRunner({ ...adhocConfig, platform: this.platform });
   }
 
   /**

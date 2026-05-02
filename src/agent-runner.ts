@@ -11,6 +11,13 @@ export interface RunOptions {
   channelId?: string; // プロセス管理用
   appSessionId?: string; // xangi側セッションID（ログ用）
   effort?: EffortLevel; // Claude Code の --effort オプション
+  /**
+   * dynamic-runner のルーティング前段（regex で model を切り替える層）をスキップする。
+   * 既存セッションの文脈で続報を取りたい呼び出し（自動エラーフォローアップ等）で
+   * 使う。プロンプトに「エラー」等が含まれて router が発火し、ad-hoc / no-session
+   * 経路へ迂回して元セッションが見えなくなるのを防ぐ。
+   */
+  skipRouting?: boolean;
 }
 
 export interface RunResult {
