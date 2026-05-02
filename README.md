@@ -196,6 +196,7 @@ xangi を使ったAIアシスタント構築のノウハウをまとめた書籍
 - [Discord セットアップ](docs/discord-setup.md) - Bot作成・ID確認方法
 - [Slack セットアップ](docs/slack-setup.md) - Slack連携
 - [設計ドキュメント](docs/design.md) - アーキテクチャ・設計思想・データフロー
+- [ルーティング Phase 1 観察メモ](docs/routing-phase1-notes.md) - エラー検知 → Opus 振り分けの運用観察ポイント
 
 ## Acknowledgments
 

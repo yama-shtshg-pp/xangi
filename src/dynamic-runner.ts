@@ -3,8 +3,10 @@ import { createAgentRunner, getBackendDisplayName } from './agent-runner.js';
 import type { AgentConfig, Config } from './config.js';
 import { BackendResolver, type ResolvedBackend } from './backend-resolver.js';
 import { RunnerManager } from './runner-manager.js';
+import { ClaudeCodeRunner } from './claude-code.js';
 import { deleteSession } from './sessions.js';
 import type { ChatPlatform } from './prompts/index.js';
+import { routeModel, type RoutedModel } from './router.js';
 
 /**
  * チャンネルごとにバックエンドを動的に切り替えるランナーマネージャー
@@ -134,6 +136,13 @@ export class DynamicRunnerManager implements AgentRunner {
   async run(prompt: string, options?: RunOptions): Promise<RunResult> {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
+
+    // ルーティング前段: claude-code バックエンドのときのみ regex で model 上書きを試みる
+    const routed = resolved.backend === 'claude-code' ? routeModel(prompt) : undefined;
+    if (routed) {
+      return this.runWithRoutedModel(prompt, routed, options);
+    }
+
     const runner = this.getRunner(channelId, resolved);
 
     // effort をオプションに注入（per-request型のclaude-codeで使用）
@@ -152,11 +161,65 @@ export class DynamicRunnerManager implements AgentRunner {
   ): Promise<RunResult> {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
+
+    const routed = resolved.backend === 'claude-code' ? routeModel(prompt) : undefined;
+    if (routed) {
+      return this.runStreamWithRoutedModel(prompt, callbacks, routed, options);
+    }
+
     const runner = this.getRunner(channelId, resolved);
 
     const runOptions = resolved.effort ? { ...options, effort: resolved.effort } : options;
 
     return runner.runStream(prompt, callbacks, runOptions);
+  }
+
+  /**
+   * ルーティングで上書きされた model を ad-hoc な ClaudeCodeRunner で実行する。
+   *
+   * Why: persistent runner はプロセス起動時に model 固定で立ち上がるため、
+   * メッセージ単位で model を切り替えるには毎回 spawn するしかない。
+   * 本流チャンネルの session を汚さないよう sessionId は新規発行し、
+   * 戻り値の sessionId は呼び出し元から渡された値で上書きする。
+   */
+  private async runWithRoutedModel(
+    prompt: string,
+    model: RoutedModel,
+    options?: RunOptions
+  ): Promise<RunResult> {
+    const runner = this.createAdhocClaudeCodeRunner(model);
+    const adhocOptions: RunOptions = { ...options, sessionId: undefined };
+    console.log(`[dynamic-runner] Routed to ${model} (ad-hoc, no session)`);
+    const result = await runner.run(prompt, adhocOptions);
+    return {
+      result: result.result,
+      sessionId: options?.sessionId ?? '',
+    };
+  }
+
+  private async runStreamWithRoutedModel(
+    prompt: string,
+    callbacks: StreamCallbacks,
+    model: RoutedModel,
+    options?: RunOptions
+  ): Promise<RunResult> {
+    const runner = this.createAdhocClaudeCodeRunner(model);
+    const adhocOptions: RunOptions = { ...options, sessionId: undefined };
+    console.log(`[dynamic-runner] Routed to ${model} (ad-hoc stream, no session)`);
+    const result = await runner.runStream(prompt, callbacks, adhocOptions);
+    return {
+      result: result.result,
+      sessionId: options?.sessionId ?? '',
+    };
+  }
+
+  private createAdhocClaudeCodeRunner(model: RoutedModel): ClaudeCodeRunner {
+    const adhocConfig: AgentConfig = {
+      ...this.config.agent.config,
+      model,
+      persistent: false,
+    };
+    return new ClaudeCodeRunner({ ...adhocConfig, platform: this.platform });
   }
 
   /**
