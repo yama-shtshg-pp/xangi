@@ -1,6 +1,6 @@
 import type { AgentRunner, RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { createAgentRunner, getBackendDisplayName } from './agent-runner.js';
-import type { AgentConfig, Config } from './config.js';
+import type { AgentConfig, Config, EffortLevel } from './config.js';
 import { BackendResolver, type ResolvedBackend } from './backend-resolver.js';
 import { RunnerManager } from './runner-manager.js';
 import { ClaudeCodeRunner } from './claude-code.js';
@@ -137,10 +137,14 @@ export class DynamicRunnerManager implements AgentRunner {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
 
-    // ルーティング前段: claude-code バックエンドのときのみ regex で model 上書きを試みる
-    const routed = resolved.backend === 'claude-code' ? routeModel(prompt) : undefined;
+    // ルーティング前段: claude-code かつ チャンネル側で opus 固定済みでないときに限り判定
+    // Why: /model set で opus 固定したチャンネルは persistent セッション継続が意図なので尊重する
+    const routed =
+      resolved.backend === 'claude-code' && resolved.model !== 'opus'
+        ? routeModel(prompt)
+        : undefined;
     if (routed) {
-      return this.runWithRoutedModel(prompt, routed, options);
+      return this.runWithRoutedModel(prompt, routed, resolved.effort, options);
     }
 
     const runner = this.getRunner(channelId, resolved);
@@ -162,9 +166,12 @@ export class DynamicRunnerManager implements AgentRunner {
     const channelId = options?.channelId;
     const resolved = this.resolver.resolve(channelId);
 
-    const routed = resolved.backend === 'claude-code' ? routeModel(prompt) : undefined;
+    const routed =
+      resolved.backend === 'claude-code' && resolved.model !== 'opus'
+        ? routeModel(prompt)
+        : undefined;
     if (routed) {
-      return this.runStreamWithRoutedModel(prompt, callbacks, routed, options);
+      return this.runStreamWithRoutedModel(prompt, callbacks, routed, resolved.effort, options);
     }
 
     const runner = this.getRunner(channelId, resolved);
@@ -181,14 +188,20 @@ export class DynamicRunnerManager implements AgentRunner {
    * メッセージ単位で model を切り替えるには毎回 spawn するしかない。
    * 本流チャンネルの session を汚さないよう sessionId は新規発行し、
    * 戻り値の sessionId は呼び出し元から渡された値で上書きする。
+   * effort はチャンネル override（resolved.effort）を引き継いで一貫性を保つ。
    */
   private async runWithRoutedModel(
     prompt: string,
     model: RoutedModel,
+    effort: EffortLevel | undefined,
     options?: RunOptions
   ): Promise<RunResult> {
     const runner = this.createAdhocClaudeCodeRunner(model);
-    const adhocOptions: RunOptions = { ...options, sessionId: undefined };
+    const adhocOptions: RunOptions = {
+      ...options,
+      sessionId: undefined,
+      effort: effort ?? options?.effort,
+    };
     console.log(`[dynamic-runner] Routed to ${model} (ad-hoc, no session)`);
     const result = await runner.run(prompt, adhocOptions);
     return {
@@ -201,15 +214,34 @@ export class DynamicRunnerManager implements AgentRunner {
     prompt: string,
     callbacks: StreamCallbacks,
     model: RoutedModel,
+    effort: EffortLevel | undefined,
     options?: RunOptions
   ): Promise<RunResult> {
     const runner = this.createAdhocClaudeCodeRunner(model);
-    const adhocOptions: RunOptions = { ...options, sessionId: undefined };
+    const adhocOptions: RunOptions = {
+      ...options,
+      sessionId: undefined,
+      effort: effort ?? options?.effort,
+    };
+    // 本流セッション保護: ad-hoc 実行で発火する onComplete の sessionId も
+    // 呼び出し元の sessionId に置換する（web-chat 等の永続化先で本流が上書きされるのを防ぐ）
+    const protectedSessionId = options?.sessionId ?? '';
+    const onComplete = callbacks.onComplete;
+    const wrappedCallbacks: StreamCallbacks = {
+      ...callbacks,
+      onComplete: onComplete
+        ? (result: RunResult) =>
+            onComplete({
+              result: result.result,
+              sessionId: protectedSessionId,
+            })
+        : undefined,
+    };
     console.log(`[dynamic-runner] Routed to ${model} (ad-hoc stream, no session)`);
-    const result = await runner.runStream(prompt, callbacks, adhocOptions);
+    const result = await runner.runStream(prompt, wrappedCallbacks, adhocOptions);
     return {
       result: result.result,
-      sessionId: options?.sessionId ?? '',
+      sessionId: protectedSessionId,
     };
   }
 
