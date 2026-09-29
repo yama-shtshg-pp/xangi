@@ -53,6 +53,10 @@ export interface Config {
     enabled: boolean;
     startupEnabled: boolean;
   };
+  autoAnswer: {
+    enabled: boolean;
+    maxTurns: number;
+  };
   // 後方互換性のため残す
   claudeCode: AgentConfig;
 }
@@ -175,6 +179,13 @@ export function loadConfig(): Config {
     scheduler: {
       enabled: process.env.SCHEDULER_ENABLED !== 'false', // デフォルトで有効
       startupEnabled: process.env.STARTUP_ENABLED !== 'false', // デフォルトで有効
+    },
+    autoAnswer: {
+      // 既存挙動を壊さないため明示有効化方式（OFF がデフォルト）
+      enabled: process.env.AUTO_ANSWER_ENABLED === 'true',
+      maxTurns: process.env.AUTO_ANSWER_MAX_TURNS
+        ? Math.max(0, parseInt(process.env.AUTO_ANSWER_MAX_TURNS, 10) || 0)
+        : 3,
     },
     // 後方互換性のため残す
     claudeCode: agentConfig,

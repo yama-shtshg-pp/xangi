@@ -18,6 +18,7 @@ import { loadConfig } from './config.js';
 import { isGitHubAppEnabled } from './github-auth.js';
 import { resolveApproval, requestApproval, setApprovalEnabled } from './approval.js';
 import { getBackendDisplayName, type AgentRunner } from './agent-runner.js';
+import { runAutoAnswerLoop } from './auto-answer.js';
 import { BackendResolver } from './backend-resolver.js';
 import { DynamicRunnerManager } from './dynamic-runner.js';
 import { ClaudeCodeRunner } from './claude-code.js';
@@ -1506,6 +1507,22 @@ async function processPrompt(
     console.log(
       `[xangi] Response length: ${result.length}, session: ${newSessionId.slice(0, 8)}...`
     );
+
+    // 質問・保留宣言が末尾に残っていたら、同セッションに自動回答を投げ直す
+    // （ユーザー側に「実装済みですか？」「待ってください」を見せないため）
+    if (config.autoAnswer.enabled) {
+      const looped = await runAutoAnswerLoop(
+        runner,
+        { result, sessionId: newSessionId },
+        { skipPermissions, sessionId: newSessionId, channelId, appSessionId },
+        config.autoAnswer
+      );
+      if (looped.turns > 0) {
+        result = looped.result;
+        newSessionId = looped.sessionId;
+        setSession(channelId, newSessionId);
+      }
+    }
 
     // ファイルパスを抽出して添付送信
     const filePaths = extractFilePaths(result);
