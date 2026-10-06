@@ -9,6 +9,7 @@ xangiの詳細な使い方ガイドです。
 - [タイムスタンプ注入](#タイムスタンプ注入)
 - [セッション管理](#セッション管理)
 - [スケジューラー](#スケジューラー)
+- [GitHub issue からの起動](#github-issue-からの起動)
 - [Discordコマンド](#discordコマンド)
 - [コマンドプレフィックス](#コマンドプレフィックス)
 - [ランタイム設定](#ランタイム設定)
@@ -214,6 +215,49 @@ npx tsx src/schedule-cli.ts toggle --channel <channelId> 1
 
 - デフォルト: `/workspace/.xangi/schedules.json`
 - 環境変数 `DATA_DIR` で変更可能
+
+## GitHub issue からの起動
+
+指定したリポジトリに `agent` ラベルの付いた issue があると、xangi が Claude Code を起動して対応させます。
+チャットで話しかけなくても、issue をきっかけに動きます。
+
+### 設定
+
+```bash
+EVENTS_ENABLED=true
+EVENT_GITHUB_REPOS=owner/repo-a,owner/repo-b
+EVENT_NOTIFY_CHANNEL_ID=123456789012345678
+```
+
+- xangi は `gh issue list` で、open で `agent` ラベルの付いた issue を 5 分ごとに取ります
+  - `gh` は xangi を動かしているユーザーの認証をそのまま使います
+  - Webhook は使わないので、マシンを外部に公開する必要はありません
+- 起動した Claude Code は issue を読み、対応が要らなければ理由をコメントして終わります
+- 対応する場合は、Claude Code が `gh` で issue にコメントするか PR を作ります
+- 起動・完了・失敗は `EVENT_NOTIFY_CHANNEL_ID` の Discord チャンネルに通知されます
+
+### 起動のルール
+
+- 同じ issue では 1 回しか起動しません。ラベルを付け直しても、xangi を再起動しても同じです
+- 1 分間の load average を CPU コア数で割った値が `EVENT_MAX_LOAD` を超えている間は起動しません
+  - そのあいだ issue はキューで待ち、負荷が下がったあとのポーリングで古い順に起動します
+- 同時に起動するのは `EVENT_MAX_CONCURRENT` 件までです
+- issue ごとに専用のプロセスと新しいセッションで起動するので、チャンネルの会話とは混ざりません
+- 起動中に xangi が止まった issue は、再起動後に通知だけして再実行しません
+
+### 注意
+
+- `agent` ラベルを付けられるのは、リポジトリの triage 以上の権限を持つ人だけです
+  - ラベルを付ける前に、issue の本文が自動で実行させてよい内容かを確かめてください
+- 許可確認は `SKIP_PERMISSIONS` の設定に従います。危険なコマンドの承認フローもそのまま使われます
+
+### データ保存
+
+受け付けた issue と状態は `${DATA_DIR}/events.json` に保存されます。
+
+- このファイルが読めないときは、GitHub issue からの起動を止めて Discord に通知します
+  - 空の記録から始めると、ラベルの付いた issue をすべて起動し直してしまうためです
+  - ファイルを直すか、消してよいと確かめてから xangi を再起動してください
 
 ## Discord操作（xangi-cmd）
 
@@ -731,6 +775,18 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `IDLE_TIMEOUT_MS` | アイドルプロセスの自動終了時間 | `1800000` |
 | `DATA_DIR` | データ保存ディレクトリ（スケジュール・セッション等） | `WORKSPACE_PATH/.xangi` |
 | `GH_TOKEN` | GitHub CLIトークン | - |
+
+### GitHub issue からの起動
+
+| 変数 | 説明 | デフォルト |
+|------|------|-----------|
+| `EVENTS_ENABLED` | GitHub issue からの起動を有効にする | `false` |
+| `EVENT_GITHUB_REPOS` | 対象のリポジトリ（カンマ区切り、`owner/repo`） | - |
+| `EVENT_GITHUB_LABEL` | 起動の対象にするラベル | `agent` |
+| `EVENT_POLL_INTERVAL_SEC` | ポーリングの間隔（秒） | `300` |
+| `EVENT_MAX_LOAD` | 起動してよい負荷の上限（1 分間の load average ÷ CPU コア数） | `0.8` |
+| `EVENT_MAX_CONCURRENT` | 同時に起動する数の上限 | `1` |
+| `EVENT_NOTIFY_CHANNEL_ID` | 起動・完了・失敗を通知する Discord チャンネル | - |
 
 ### GitHub App認証（オプション）
 
