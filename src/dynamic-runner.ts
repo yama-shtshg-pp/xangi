@@ -6,7 +6,21 @@ import { RunnerManager } from './runner-manager.js';
 import { ClaudeCodeRunner } from './claude-code.js';
 import { deleteSession } from './sessions.js';
 import type { ChatPlatform } from './prompts/index.js';
-import { routeModel, type RoutedModel } from './router.js';
+import { join } from 'path';
+import {
+  routeModel,
+  routeWithJev,
+  getJevRoutingMode,
+  type JevRoutingMode,
+  type PreviousExchange,
+  type RoutedModel,
+} from './router.js';
+import { appendJevLog } from './jev-client.js';
+
+/** 追問判定に使う直前の Opus 応答の有効期限 */
+const PREVIOUS_EXCHANGE_TTL_MS = 30 * 60 * 1000;
+/** JSONL ログに残すプロンプトの先頭文字数 */
+const JEV_LOG_PROMPT_LIMIT = 100;
 
 /**
  * チャンネルごとにバックエンドを動的に切り替えるランナーマネージャー
@@ -29,10 +43,24 @@ export class DynamicRunnerManager implements AgentRunner {
   /** チャンネル別に生成したランナー（デフォルトと異なるバックエンドの場合） */
   private channelRunners = new Map<string, { runner: AgentRunner; key: string }>();
 
+  /** Jev ルーティングのモード（shadow: ログのみ） */
+  private jevMode: JevRoutingMode;
+  private jevLogPath: string;
+  /** チャンネルごとの直前の Opus（ルーティング発火）のやり取り。追問判定用 */
+  private previousExchanges = new Map<string, PreviousExchange & { at: number }>();
+
   constructor(config: Config, resolver: BackendResolver) {
     this.config = config;
     this.resolver = resolver;
     this.platform = config.agent.platform;
+
+    this.jevMode = getJevRoutingMode();
+    const workdir = config.agent.config.workdir || process.cwd();
+    const dataDir = process.env.DATA_DIR || join(workdir, '.xangi');
+    this.jevLogPath = join(dataDir, 'logs', 'jev-routing.jsonl');
+    if (this.jevMode === 'shadow') {
+      console.log(`[dynamic-runner] Jev routing: shadow (log: ${this.jevLogPath})`);
+    }
 
     // デフォルトランナーを作成
     this.defaultRunner = createAgentRunner(config.agent.backend, config.agent.config, {
@@ -139,7 +167,9 @@ export class DynamicRunnerManager implements AgentRunner {
 
     const routed = this.tryRouteModel(prompt, resolved, options);
     if (routed) {
-      return this.runWithRoutedModel(prompt, routed, resolved.effort, options);
+      const result = await this.runWithRoutedModel(prompt, routed, resolved.effort, options);
+      this.rememberExchange(channelId, prompt, result.result);
+      return result;
     }
 
     const runner = this.getRunner(channelId, resolved);
@@ -163,7 +193,15 @@ export class DynamicRunnerManager implements AgentRunner {
 
     const routed = this.tryRouteModel(prompt, resolved, options);
     if (routed) {
-      return this.runStreamWithRoutedModel(prompt, callbacks, routed, resolved.effort, options);
+      const result = await this.runStreamWithRoutedModel(
+        prompt,
+        callbacks,
+        routed,
+        resolved.effort,
+        options
+      );
+      this.rememberExchange(channelId, prompt, result.result);
+      return result;
     }
 
     const runner = this.getRunner(channelId, resolved);
@@ -264,9 +302,70 @@ export class DynamicRunnerManager implements AgentRunner {
     const effectiveModel = resolved.model ?? this.config.agent.config.model;
     if (effectiveModel?.toLowerCase().includes('opus')) return undefined;
     const model = routeModel(prompt);
-    if (!model) return undefined;
-    if (!this.resolver.isModelAllowed(model)) return undefined;
-    return model;
+    const routed = model && this.resolver.isModelAllowed(model) ? model : undefined;
+    this.shadowRouteWithJev(prompt, options?.channelId, routed, effectiveModel);
+    return routed;
+  }
+
+  /**
+   * shadow mode: Jev の判定を JSONL に残すだけで、振り分けは変えない。
+   *
+   * Why: Jev の呼び出しは await しない。応答時間にも、API の失敗にも
+   * 本流の処理を巻き込まないため（fail-open）。
+   * 追問判定は「Opus の回答直後のメッセージ」だけが対象なので、
+   * regex が発火しなかったメッセージを処理した時点で直前のやり取りは捨てる。
+   */
+  private shadowRouteWithJev(
+    prompt: string,
+    channelId: string | undefined,
+    regexResult: RoutedModel | undefined,
+    defaultModel: string | undefined
+  ): void {
+    if (this.jevMode !== 'shadow') return;
+
+    let previous: PreviousExchange | undefined;
+    if (channelId) {
+      const entry = this.previousExchanges.get(channelId);
+      if (entry && Date.now() - entry.at <= PREVIOUS_EXCHANGE_TTL_MS) {
+        previous = { userMessage: entry.userMessage, assistantAnswer: entry.assistantAnswer };
+      }
+      if (!regexResult) this.previousExchanges.delete(channelId);
+    }
+
+    void routeWithJev(prompt, previous)
+      .then((jev) =>
+        appendJevLog(this.jevLogPath, {
+          timestamp: new Date().toISOString(),
+          channel: channelId ?? null,
+          prompt: prompt.slice(0, JEV_LOG_PROMPT_LIMIT),
+          regex: regexResult ?? 'default',
+          default_model: defaultModel ?? null,
+          jev: jev.model ?? null,
+          jev_effort: jev.effort ?? null,
+          confidence: jev.confidence ?? null,
+          probabilities: jev.probabilities ?? null,
+          has_previous: previous !== undefined,
+          followup: jev.followup ?? null,
+          latency_ms: jev.latencyMs,
+          error: jev.error ?? null,
+          jev_model: jev.jevModel ?? null,
+        })
+      )
+      .catch((err) => {
+        console.warn(
+          `[dynamic-runner] Jev shadow routing failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      });
+  }
+
+  /** ルーティング発火（Opus）で答えたやり取りを、次のメッセージの追問判定用に覚えておく */
+  private rememberExchange(
+    channelId: string | undefined,
+    userMessage: string,
+    assistantAnswer: string
+  ): void {
+    if (this.jevMode === 'off' || !channelId || !assistantAnswer) return;
+    this.previousExchanges.set(channelId, { userMessage, assistantAnswer, at: Date.now() });
   }
 
   private createAdhocClaudeCodeRunner(model: RoutedModel): ClaudeCodeRunner {
