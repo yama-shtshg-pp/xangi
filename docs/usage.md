@@ -774,6 +774,8 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `MAX_PROCESSES` | 同時実行プロセス数の上限 | `10` |
 | `IDLE_TIMEOUT_MS` | アイドルプロセスの自動終了時間 | `1800000` |
 | `DATA_DIR` | データ保存ディレクトリ（スケジュール・セッション等） | `WORKSPACE_PATH/.xangi` |
+| `JEV_ROUTING` | Jev によるルーティング判定（`off` / `shadow`）。詳細は [routing-phase1-notes.md](routing-phase1-notes.md) | `off` |
+| `TYPESAFE_API_KEY` | TypeSafe（Jev）の API キー。AI CLI には渡さない | - |
 | `GH_TOKEN` | GitHub CLIトークン | - |
 
 ### GitHub issue からの起動
