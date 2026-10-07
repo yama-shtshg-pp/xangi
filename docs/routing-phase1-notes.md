@@ -71,3 +71,54 @@ Phase 1 は **発火時にセッションを毎回新規発行**する設計（�
 ```
 
 追加したい語が出てきたらここを編集。
+
+## Jev による判定の shadow 検証
+
+regex の代わりに Jev（TypeSafe System One）で振り分けられるかを、本番の振り分けを変えずに確かめる。
+Issue #9 で進めている。
+
+### 有効にする
+
+```
+JEV_ROUTING=shadow
+TYPESAFE_API_KEY=<TypeSafe の API キー>
+```
+
+- `JEV_ROUTING` の既定は `off`。`on` はまだ使えず、指定しても `off` として扱う
+- 振り分けは従来どおり regex が決める。Jev の呼び出しは待たないので、応答時間は変わらない
+- タイムアウトは 800ms。キー未設定・タイムアウト・API エラーは `error` に残し、処理は続ける
+- regex による振り分けの対象（claude-code バックエンドで、実効 model が opus 以外）だけを判定する
+
+### Jev に聞いていること
+
+1 回の呼び出しで、次の 2 つを並列に聞いている。質問文は `src/router.ts` にある。
+
+- `effort`（Choice）: 依頼に必要な処理の重さ
+  - `light` → `haiku`、`normal` → `sonnet`、`hard` → `opus` に対応付ける
+- `followup`（Noul）: 直前の回答への追問か
+  - regex が Opus に振り分けて答えた直後のメッセージ（30 分以内）だけで聞く
+  - state には直前の依頼と Opus の回答を入れる
+
+### ログ
+
+`DATA_DIR/logs/jev-routing.jsonl`（`DATA_DIR` の既定は `WORKSPACE_PATH/.xangi`）に 1 メッセージ 1 行で残る。
+
+| フィールド | 内容 |
+| --- | --- |
+| `timestamp` | 判定した時刻 |
+| `channel` | チャンネル ID |
+| `prompt` | メッセージの先頭 100 文字 |
+| `regex` | regex の結果（`opus` / `default`） |
+| `default_model` | regex が発火しないときに使う model |
+| `jev` / `jev_effort` | Jev が選んだ model と処理の重さ |
+| `confidence` / `probabilities` | `effort` の確信度と、選択肢ごとの確率 |
+| `has_previous` / `followup` | 追問判定をしたか、追問である確率 |
+| `latency_ms` | Jev の応答時間 |
+| `error` | 失敗したときの理由 |
+| `jev_model` | 応答した Jev のバージョン |
+
+食い違いの洗い出しには、たとえば次のように使う。
+
+```
+jq -c 'select(.error == null and ((.regex == "opus") != (.jev == "opus")))' jev-routing.jsonl
+```
