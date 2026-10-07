@@ -53,6 +53,9 @@ import {
 import { join } from 'path';
 import { config as dotenvConfig } from 'dotenv';
 import { startWebChat } from './web-chat.js';
+import { EventStore } from './event-store.js';
+import { GitHubIssueSource } from './event-source-github.js';
+import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 dotenvConfig({ override: true });
 
 /** メッセージを指定文字数で分割（カスタムセパレータ対応、デフォルトは行単位） */
@@ -1213,10 +1216,69 @@ async function main() {
   // スケジューラの全ジョブを開始
   scheduler.startAll(config.scheduler);
 
+  // イベント源（GitHub issue など）のポーリングを開始
+  const eventConfig = loadEventConfig();
+  let eventDispatcher: EventDispatcher | undefined;
+  if (eventConfig.enabled) {
+    const notifyChannelId = eventConfig.notifyChannelId;
+    const notifyEvent = async (message: string) => {
+      console.log(`[events] ${message.split('\n')[0]}`);
+      if (!config.discord.enabled || !notifyChannelId) return;
+      const channel = await client.channels.fetch(notifyChannelId);
+      if (channel && 'send' in channel) {
+        await (channel as { send: (content: string) => Promise<unknown> }).send(message);
+      }
+    };
+
+    let eventStore: EventStore | undefined;
+    try {
+      eventStore = new EventStore(join(dataDir, 'events.json'));
+    } catch (err) {
+      // 記録が読めないまま動くと、ラベルの付いた issue をすべて起動し直してしまうので止める
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[xangi] Event polling disabled: ${reason}`);
+      await notifyEvent(
+        `⚠️ イベントの記録を読めないため、GitHub issue からの起動を止めました。ファイルを直して再起動してください\n${reason}`
+      ).catch(() => {});
+    }
+
+    if (eventStore) {
+      eventDispatcher = new EventDispatcher({
+        sources: [new GitHubIssueSource(eventConfig.githubRepos, eventConfig.githubLabel)],
+        store: eventStore,
+        maxConcurrent: eventConfig.maxConcurrent,
+        isLoadAcceptable: () => isLoadAcceptable(eventConfig.maxLoadPerCpu),
+        notify: notifyEvent,
+        run: async (prompt, event) => {
+          // イベントごとに専用のプロセス・新しいセッションで起動し、チャンネルの会話と混ぜない
+          const runChannelId = `event:${event.source}:${event.id}`;
+          try {
+            const { result } = await agentRunner.run(prompt, {
+              skipPermissions: config.agent.config.skipPermissions ?? false,
+              sessionId: undefined,
+              channelId: runChannelId,
+            });
+            return result;
+          } finally {
+            agentRunner.destroy?.(runChannelId);
+          }
+        },
+      });
+      // 初回のポーリング（gh の呼び出し）で起動処理を待たせない
+      eventDispatcher.start(eventConfig.pollIntervalMs).catch((err) => {
+        console.error('[xangi] Failed to start event polling:', err);
+      });
+      console.log(
+        `[xangi] Event polling started: ${eventConfig.githubRepos.join(', ')} (label: ${eventConfig.githubLabel})`
+      );
+    }
+  }
+
   // シャットダウン時にスケジューラを停止
   const shutdown = () => {
     console.log('[xangi] Shutting down scheduler...');
     scheduler.stopAll();
+    eventDispatcher?.stop();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
