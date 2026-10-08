@@ -22,6 +22,10 @@ export interface AgentEvent {
   body: string;
   url: string;
   labels: string[];
+  /** Claude Code の作業ディレクトリ（ウォッチリストの path）。未指定なら xangi のワークスペース */
+  workdir?: string;
+  /** 起動・終了・失敗の通知先。未指定なら EVENT_NOTIFY_CHANNEL_ID */
+  notifyChannelId?: string;
 }
 
 export type EventStatus = 'queued' | 'running' | 'done' | 'failed' | 'interrupted';
@@ -45,7 +49,9 @@ export class EventStore {
   }
 
   private key(event: Pick<AgentEvent, 'source' | 'id'>): string {
-    return `${event.source}:${event.id}`;
+    // GitHub のリポジトリ名は大文字・小文字を区別しない。remote の URL と EVENT_GITHUB_REPOS で
+    // 綴りの大小が違っても、同じ issue を 2 回起動しないようにする
+    return `${event.source}:${event.id}`.toLowerCase();
   }
 
   private load(): void {

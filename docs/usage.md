@@ -226,15 +226,60 @@ xangi が受け持つのは起動までです。起動したあとのやり取�
 
 ```bash
 EVENTS_ENABLED=true
-EVENT_GITHUB_REPOS=owner/repo-a,owner/repo-b
 EVENT_NOTIFY_CHANNEL_ID=123456789012345678
 ```
 
-- xangi は `gh issue list` で、open で `agent` ラベルの付いた issue を 5 分ごとに取ります
+対象のリポジトリは、`DATA_DIR/watch-repos.json`（ウォッチリスト）に手元のパスで並べます。
+
+```json
+{
+  "repos": [
+    { "path": "~/git_tmp/my-xangi" },
+    { "path": "~/git_tmp/some-fork", "remote": "upstream" },
+    { "path": "~/git_tmp/keiba-note", "label": "bot", "enabled": false }
+  ]
+}
+```
+
+- xangi は `gh issue list` で、open で対象のラベル（既定は `agent`）の付いた issue を 5 分ごとに取ります
   - `gh` は xangi を動かしているユーザーの認証をそのまま使います
   - Webhook は使わないので、マシンを外部に公開する必要はありません
 - 起動・終了・失敗はログに出ます
   - Discord が有効で `EVENT_NOTIFY_CHANNEL_ID` があれば、そのチャンネルにも通知します
+
+### ウォッチリスト
+
+項目ごとに次の値を書けます。
+
+| 項目 | 説明 | 省略時 |
+|---|---|---|
+| `path` | 手元のリポジトリ（必須）。`~` を展開します。絶対パスか `~` で始めます | - |
+| `remote` | GitHub のリポジトリ名を読み取る remote | `origin` |
+| `repo` | `owner/repo`。書くと remote から読み取らずにこの値を使います | remote から読み取る |
+| `label` | 起動の対象にするラベル | `EVENT_GITHUB_LABEL` |
+| `notifyChannelId` | 起動・終了・失敗の通知先 | `EVENT_NOTIFY_CHANNEL_ID` |
+| `enabled` | `false` にするとポーリングしません | `true` |
+
+- Claude Code は項目の `path` で起動します。そのリポジトリの `CLAUDE.md` や品質ゲートが最初から効きます
+- GitHub のリポジトリ名は、`git -C <path> remote get-url <remote>` の URL から読み取ります
+  - HTTPS（`https://github.com/owner/repo.git`）と SSH（`git@github.com:owner/repo.git`）に対応します
+  - `git@github-sub:owner/repo.git` のような SSH の別名ホストでも読み取れます
+  - フォークのように remote が複数あるときは、issue を立てる側を `remote` か `repo` で指定します
+- xangi はポーリングのたびにファイルを読み直します。追加・削除・無効化に再起動は要りません
+  - リポジトリ名の大文字・小文字は区別しません。`EVENT_GITHUB_REPOS` から移っても、綴りの大小の違いで同じ issue を起動し直しません
+  - xangi の起動時にファイルがなく、`EVENT_GITHUB_REPOS` も空のときは、イベントからの起動が無効になります。あとからファイルを作ったら、xangi を再起動してください
+- ファイルが読めないときや JSON の形式がおかしいときは、そのポーリングを飛ばしてログに残します
+  - 前回読めた内容でも動かしません。JSON の形式エラーはログに行と列を出します
+  - 全リポジトリのポーリングが止まるので、同じエラーは `EVENT_NOTIFY_CHANNEL_ID` に 1 回だけ通知します
+- 次の項目は飛ばし、Discord に 1 回だけ通知します。直したあとにまた同じ問題が起きたら、もう一度通知します
+  - 通知には git のエラーをそのまま入れます。タイムアウトなどで失敗したときも飛ばします
+  - `path` が存在しない、または git リポジトリでない
+  - remote がない、または URL から `owner/repo` を読み取れない
+  - 前の項目と同じリポジトリを指している
+
+ウォッチリストがなく `EVENT_GITHUB_REPOS` があるときは、従来どおり `EVENT_GITHUB_REPOS` のリポジトリをポーリングします。
+このとき Claude Code の作業ディレクトリは xangi のワークスペースです。
+両方あるときはウォッチリストを使い、`EVENT_GITHUB_REPOS` を無視することを起動時にログに出します。
 
 ### チャットなしで動かす
 
@@ -243,7 +288,7 @@ Discord・Slack・Web チャットを設定しなくても、イベント源だ�
 
 ```bash
 EVENTS_ENABLED=true
-EVENT_GITHUB_REPOS=owner/repo-a
+# 対象のリポジトリは DATA_DIR/watch-repos.json に並べる
 # DISCORD_TOKEN / SLACK_* / WEB_CHAT_ENABLED は設定しない
 # claude が PATH にないときだけ指定する
 # EVENT_CLAUDE_PATH=/Users/you/.local/bin/claude
@@ -261,14 +306,16 @@ EVENT_GITHUB_REPOS=owner/repo-a
 issue ごとに、次の名前で tmux のセッションを作り、Claude Code を起動します。
 
 ```bash
-tmux new-session -d -s cc-<リポジトリ名>-issue<番号> -c <ワークスペース> -- \
+tmux new-session -d -s cc-<リポジトリ名>-issue<番号> -c <作業ディレクトリ> -- \
   claude -n cc-<リポジトリ名>-issue<番号> --remote-control cc-<リポジトリ名>-issue<番号> "<issue の内容>"
 ```
 
 - セッション名の中で tmux が使えない文字（`.` や `:`）は `-` に置き換えます
 - issue の内容は最初のプロンプトとして渡します。シェルは通さないので、本文の `$()` などは実行されません
-- 作業ディレクトリは xangi のワークスペース（`WORKSPACE_PATH`）です
+- 作業ディレクトリは、ウォッチリストの項目の `path` です
+  - `EVENT_GITHUB_REPOS` で動かしているときは、xangi のワークスペース（`WORKSPACE_PATH`）です
   - Claude Code に信頼済みのフォルダにしておいてください。信頼の確認が出ると、そこで止まります
+  - 作業ディレクトリは issue を受け付けたときの値を使います。受け付けたあとにウォッチリストを変えても、待っている issue の起動先は変わりません
 - セッションの PATH は xangi のものを使います。GitHub App 認証を使っていれば、`gh` はアプリの権限で動きます
 - `TMUX_TMPDIR` は xangi に設定されている値を使います。手元の tmux と同じ値にしておかないと、`tmux attach` でセッションが見つかりません
 - 許可の確認と入力待ちの通知は、Claude Code の Remote Control とプッシュ通知に任せます
@@ -832,12 +879,12 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
 | `EVENTS_ENABLED` | GitHub issue からの起動を有効にする | `false` |
-| `EVENT_GITHUB_REPOS` | 対象のリポジトリ（カンマ区切り、`owner/repo`） | - |
-| `EVENT_GITHUB_LABEL` | 起動の対象にするラベル | `agent` |
+| `EVENT_GITHUB_REPOS` | 対象のリポジトリ（カンマ区切り、`owner/repo`）。`DATA_DIR/watch-repos.json` がないときだけ使う | - |
+| `EVENT_GITHUB_LABEL` | 起動の対象にするラベル（ウォッチリストの `label` の既定値） | `agent` |
 | `EVENT_POLL_INTERVAL_SEC` | ポーリングの間隔（秒） | `300` |
 | `EVENT_MAX_LOAD` | 起動してよい負荷の上限（1 分間の load average ÷ CPU コア数） | `0.8` |
 | `EVENT_MAX_CONCURRENT` | 同時に起動する数の上限 | `1` |
-| `EVENT_NOTIFY_CHANNEL_ID` | 起動・終了・失敗を通知する Discord チャンネル | - |
+| `EVENT_NOTIFY_CHANNEL_ID` | 起動・終了・失敗を通知する Discord チャンネル（ウォッチリストの `notifyChannelId` の既定値） | - |
 | `EVENT_CLAUDE_PATH` | イベントから起動する `claude` のパス | PATH から探す |
 
 ### GitHub App認証（オプション）

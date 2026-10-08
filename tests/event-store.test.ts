@@ -36,6 +36,14 @@ describe('EventStore', () => {
     expect(store.countByStatus('queued')).toBe(1);
   });
 
+  it('リポジトリ名の大文字・小文字が違っても同じイベントとみなす（読み直したあとも）', () => {
+    const store = new EventStore(path);
+    store.enqueue(makeEvent('O/My-Repo#1'));
+    store.setStatus(makeEvent('o/my-repo#1'), 'done');
+    expect(store.countByStatus('done')).toBe(1);
+    expect(new EventStore(path).enqueue(makeEvent('o/my-repo#1'))).toBe(false);
+  });
+
   it('完了したイベントも再び受け付けない', () => {
     const store = new EventStore(path);
     const event = makeEvent('o/r#1');

@@ -189,6 +189,16 @@ describe('EventDispatcher', () => {
     expect(launch).toHaveBeenCalledTimes(1);
   });
 
+  it('起動と終了の通知は、イベントの通知先に送る', async () => {
+    events = [{ ...makeEvent(1), notifyChannelId: '999' }];
+    const dispatcher = makeDispatcher();
+    await dispatcher.poll();
+    alive.clear();
+    await dispatcher.poll();
+
+    expect(notify.mock.calls.map((c) => c[1])).toEqual(['999', '999']);
+  });
+
   it('通知に失敗しても起動は続ける', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     events = [makeEvent(1)];
@@ -346,6 +356,19 @@ describe('loadEventConfig', () => {
   it('リポジトリが空なら有効にしない', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(loadEventConfig({ EVENTS_ENABLED: 'true' }).enabled).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('ウォッチリストがあれば、EVENT_GITHUB_REPOS が空でも有効にする', () => {
+    expect(loadEventConfig({ EVENTS_ENABLED: 'true' }, true).enabled).toBe(true);
+  });
+
+  it('ウォッチリストと EVENT_GITHUB_REPOS の両方があれば、EVENT_GITHUB_REPOS を無視するとログに出す', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(
+      loadEventConfig({ EVENTS_ENABLED: 'true', EVENT_GITHUB_REPOS: 'o/a' }, true).enabled
+    ).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('EVENT_GITHUB_REPOS is ignored'));
     warn.mockRestore();
   });
 

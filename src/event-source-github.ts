@@ -1,7 +1,8 @@
 /**
  * イベント源: GitHub issue のポーリング
  *
- * 指定したリポジトリの、指定ラベルが付いた open な issue を `gh issue list` で取る。
+ * 対象のリポジトリごとに、そのラベルが付いた open な issue を `gh issue list` で取る。
+ * 対象の一覧はポーリングのたびに取り直す（ウォッチリストの変更を再起動なしで反映するため）。
  *
  * Why: Webhook を受けるには Mac mini を外部に公開する必要がある。
  * ポーリングなら外向きの通信だけで済み、手元の gh の認証をそのまま使える。
@@ -17,6 +18,20 @@ export interface EventSource {
 
 /** gh を実行して標準出力を返す（テストで差し替える） */
 export type GhExec = (args: string[]) => Promise<string>;
+
+/** ポーリングの対象（リポジトリごとの設定） */
+export interface RepoTarget {
+  /** owner/repo */
+  repo: string;
+  label: string;
+  /** Claude Code の作業ディレクトリ。未指定なら xangi のワークスペース */
+  workdir?: string;
+  /** 通知先の Discord チャンネル。未指定なら EVENT_NOTIFY_CHANNEL_ID */
+  notifyChannelId?: string;
+}
+
+/** 対象の一覧を返す。投げたらそのポーリングを飛ばす */
+export type RepoTargetProvider = () => Promise<RepoTarget[]>;
 
 const execFileAsync = promisify(execFile);
 
@@ -45,37 +60,38 @@ export class GitHubIssueSource implements EventSource {
   readonly name = GITHUB_ISSUE_SOURCE;
 
   constructor(
-    private repos: string[],
-    private label: string,
+    private targets: RepoTargetProvider,
     private gh: GhExec = defaultGhExec
   ) {}
 
   /**
    * 全リポジトリの issue を取る。
    * 1 つのリポジトリで失敗しても、ほかのリポジトリの結果は返す。
+   * @throws 対象の一覧を取れないとき
    */
   async poll(): Promise<AgentEvent[]> {
     const events: AgentEvent[] = [];
-    for (const repo of this.repos) {
+    for (const target of await this.targets()) {
       try {
-        events.push(...(await this.pollRepo(repo)));
+        events.push(...(await this.pollRepo(target)));
       } catch (err) {
         console.error(
-          `[event-source-github] Failed to list issues of ${repo}: ${err instanceof Error ? err.message : String(err)}`
+          `[event-source-github] Failed to list issues of ${target.repo}: ${err instanceof Error ? err.message : String(err)}`
         );
       }
     }
     return events;
   }
 
-  private async pollRepo(repo: string): Promise<AgentEvent[]> {
+  private async pollRepo(target: RepoTarget): Promise<AgentEvent[]> {
+    const { repo, label } = target;
     const stdout = await this.gh([
       'issue',
       'list',
       '--repo',
       repo,
       '--label',
-      this.label,
+      label,
       '--state',
       'open',
       '--limit',
@@ -93,6 +109,8 @@ export class GitHubIssueSource implements EventSource {
       body: issue.body ?? '',
       url: issue.url,
       labels: issue.labels.map((l) => l.name),
+      ...(target.workdir ? { workdir: target.workdir } : {}),
+      ...(target.notifyChannelId ? { notifyChannelId: target.notifyChannelId } : {}),
     }));
   }
 }
