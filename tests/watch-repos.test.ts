@@ -177,7 +177,7 @@ describe('WatchRepoList', () => {
     ['~/missing', 'directory not found'],
     ['relative/path', 'path must be absolute'],
     ['~/plain', 'not a git repository'],
-    ['~/no-remote', 'remote "origin" not found'],
+    ['~/no-remote', "git remote get-url origin failed: error: No such remote 'origin'"],
   ])('%s は飛ばして通知する（%s）', async (path, message) => {
     write([{ path, notifyChannelId: 'ch' }, { path: '~/a' }]);
 
@@ -215,6 +215,37 @@ describe('WatchRepoList', () => {
 
     expect((await makeList().load()).map((t) => t.workdir)).toEqual([join(home, 'a')]);
     expect(notify.mock.calls[0][0]).toContain('already watched');
+  });
+
+  it('ファイルが読めないときは、同じエラーを 1 回だけ既定の通知先に通知する', async () => {
+    const list = makeList();
+    writeFileSync(filePath, '{ "repos": [ }');
+    await expect(list.load()).rejects.toThrow();
+    await expect(list.load()).rejects.toThrow();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toContain('ポーリングを止めています');
+    expect(notify.mock.calls[0][1]).toBe('default-ch');
+  });
+
+  it('git が失敗した理由を通知に入れる（git リポジトリでないと決めつけない）', async () => {
+    git = vi.fn(async () => {
+      throw Object.assign(new Error('Command failed'), { stderr: 'timed out\nmore' });
+    });
+    write([{ path: '~/a' }]);
+    await makeList().load();
+    expect(notify.mock.calls[0][0]).toContain('git rev-parse failed: timed out');
+  });
+
+  it('通知に失敗したら、次のポーリングで送り直す', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    notify.mockRejectedValueOnce(new Error('Missing Access'));
+    const list = makeList();
+    write([{ path: '~/missing' }]);
+    await list.load();
+    await list.load();
+    await list.load();
+    expect(notify).toHaveBeenCalledTimes(2);
   });
 
   it('通知に失敗しても対象の一覧は返す', async () => {

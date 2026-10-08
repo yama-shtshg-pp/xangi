@@ -49,7 +49,9 @@ export class EventStore {
   }
 
   private key(event: Pick<AgentEvent, 'source' | 'id'>): string {
-    return `${event.source}:${event.id}`;
+    // GitHub のリポジトリ名は大文字・小文字を区別しない。remote の URL と EVENT_GITHUB_REPOS で
+    // 綴りの大小が違っても、同じ issue を 2 回起動しないようにする
+    return `${event.source}:${event.id}`.toLowerCase();
   }
 
   private load(): void {

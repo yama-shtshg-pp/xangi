@@ -17,6 +17,12 @@ import type { RepoTarget } from './event-source-github.js';
 
 export const WATCH_REPOS_FILE = 'watch-repos.json';
 
+/** ウォッチリストのパス（index.ts の DATA_DIR と同じ決め方） */
+export function getWatchListPath(env: NodeJS.ProcessEnv = process.env): string {
+  const dataDir = env.DATA_DIR || join(env.WORKSPACE_PATH || process.cwd(), '.xangi');
+  return join(dataDir, WATCH_REPOS_FILE);
+}
+
 export interface WatchRepoEntry {
   /** 手元のリポジトリ（必須。`~` を展開する） */
   path: string;
@@ -191,13 +197,17 @@ export class WatchRepoList {
     try {
       entries = parseWatchRepos(readFileSync(this.options.filePath, 'utf-8'));
     } catch (err) {
-      throw new Error(
-        `Failed to read ${this.options.filePath}: ${err instanceof Error ? err.message : String(err)}`
+      const message = `Failed to read ${this.options.filePath}: ${errorMessage(err)}`;
+      // ログだけだと、全リポジトリのポーリングが止まっていることに気づけない
+      await this.report(
+        new Map([[`\n${message}`, { message, channelId: this.options.defaults.notifyChannelId }]]),
+        '⚠️ ウォッチリストを読めないため、GitHub issue のポーリングを止めています'
       );
+      throw new Error(message);
     }
 
     const targets: RepoTarget[] = [];
-    const problems = new Map<string, { message: string; channelId?: string }>();
+    const problems: Problems = new Map();
     for (const entry of entries) {
       if (entry.enabled === false) continue;
       const channelId = entry.notifyChannelId?.trim() || this.options.defaults.notifyChannelId;
@@ -222,7 +232,7 @@ export class WatchRepoList {
       });
     }
 
-    await this.report(problems);
+    await this.report(problems, '⚠️ ウォッチリストの項目を飛ばしました');
     return targets;
   }
 
@@ -235,8 +245,9 @@ export class WatchRepoList {
     try {
       const inside = await this.git(['-C', path, 'rev-parse', '--is-inside-work-tree']);
       if (inside.trim() !== 'true') return { error: `${entry.path}: not a git repository` };
-    } catch {
-      return { error: `${entry.path}: not a git repository` };
+    } catch (err) {
+      // タイムアウトなど、git リポジトリでないこと以外の失敗を取り違えないよう、git のエラーをそのまま出す
+      return { error: `${entry.path}: git rev-parse failed: ${gitError(err)}` };
     }
     if (entry.repo) return { repo: entry.repo.trim() };
 
@@ -244,8 +255,8 @@ export class WatchRepoList {
     let url: string;
     try {
       url = (await this.git(['-C', path, 'remote', 'get-url', remote])).trim();
-    } catch {
-      return { error: `${entry.path}: remote "${remote}" not found` };
+    } catch (err) {
+      return { error: `${entry.path}: git remote get-url ${remote} failed: ${gitError(err)}` };
     }
     const repo = parseGitHubRepo(url);
     if (!repo) {
@@ -255,25 +266,34 @@ export class WatchRepoList {
   }
 
   /** 新しく出た問題だけを通知する。解消した問題は忘れる */
-  private async report(
-    problems: Map<string, { message: string; channelId?: string }>
-  ): Promise<void> {
+  private async report(problems: Problems, title: string): Promise<void> {
     for (const key of this.notified) {
       if (!problems.has(key)) this.notified.delete(key);
     }
     for (const [key, { message, channelId }] of problems) {
-      console.warn(`[watch-repos] Skipped: ${message}`);
+      console.warn(`[watch-repos] ${message}`);
       if (this.notified.has(key)) continue;
-      this.notified.add(key);
       try {
-        await this.options.notify(`⚠️ ウォッチリストの項目を飛ばしました: ${message}`, channelId);
+        await this.options.notify(`${title}: ${message}`, channelId);
+        // 送れなかったら、次のポーリングで送り直す
+        this.notified.add(key);
       } catch (err) {
-        console.error(
-          `[watch-repos] Notify failed: ${err instanceof Error ? err.message : String(err)}`
-        );
+        console.error(`[watch-repos] Notify failed: ${errorMessage(err)}`);
       }
     }
   }
+}
+
+type Problems = Map<string, { message: string; channelId?: string }>;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** git の失敗の理由（stderr の 1 行目。なければエラーメッセージ） */
+function gitError(err: unknown): string {
+  const stderr = String((err as { stderr?: unknown }).stderr ?? '').trim();
+  return (stderr || errorMessage(err)).split('\n')[0];
 }
 
 function isDirectory(path: string): boolean {

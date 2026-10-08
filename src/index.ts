@@ -58,7 +58,7 @@ import { EventStore } from './event-store.js';
 import { GitHubIssueSource, type RepoTarget } from './event-source-github.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
-import { WATCH_REPOS_FILE, WatchRepoList } from './watch-repos.js';
+import { WATCH_REPOS_FILE, WatchRepoList, getWatchListPath } from './watch-repos.js';
 import { getSafeEnv } from './safe-env.js';
 dotenvConfig({ override: true });
 
@@ -1211,7 +1211,7 @@ async function main() {
   }
 
   // イベント源（GitHub issue など）。claude と tmux が見つからなければ使えない
-  const watchListPath = join(dataDir, WATCH_REPOS_FILE);
+  const watchListPath = getWatchListPath();
   const eventConfig = loadEventConfig(process.env, existsSync(watchListPath));
   // 通知はウォッチリストの項目ごとの通知先を優先し、なければ EVENT_NOTIFY_CHANNEL_ID に送る
   const notifyEvent = async (message: string, channelId = eventConfig.notifyChannelId) => {

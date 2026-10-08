@@ -1,6 +1,8 @@
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import type { ChatPlatform } from './prompts/index.js';
+import { existsSync } from 'fs';
 import { loadEventConfig } from './event-dispatcher.js';
+import { getWatchListPath } from './watch-repos.js';
 
 export type AgentBackend = 'claude-code' | 'codex' | 'gemini' | 'local-llm';
 
@@ -65,9 +67,14 @@ export function loadConfig(): Config {
 
   // 少なくともどれかが有効である必要がある（WebChatのみ・イベント源のみでもOK）
   const webChatEnabled = process.env.WEB_CHAT_ENABLED === 'true';
-  if (!discordToken && !slackBotToken && !webChatEnabled && !loadEventConfig().enabled) {
+  if (
+    !discordToken &&
+    !slackBotToken &&
+    !webChatEnabled &&
+    !loadEventConfig(process.env, existsSync(getWatchListPath())).enabled
+  ) {
     throw new Error(
-      'DISCORD_TOKEN, SLACK_BOT_TOKEN, WEB_CHAT_ENABLED=true, or EVENTS_ENABLED=true (with EVENT_GITHUB_REPOS) environment variable is required'
+      'DISCORD_TOKEN, SLACK_BOT_TOKEN, WEB_CHAT_ENABLED=true, or EVENTS_ENABLED=true (with watch-repos.json or EVENT_GITHUB_REPOS) environment variable is required'
     );
   }
 
