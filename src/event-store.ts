@@ -22,6 +22,10 @@ export interface AgentEvent {
   body: string;
   url: string;
   labels: string[];
+  /** Claude Code の作業ディレクトリ（ウォッチリストの path）。未指定なら xangi のワークスペース */
+  workdir?: string;
+  /** 起動・終了・失敗の通知先。未指定なら EVENT_NOTIFY_CHANNEL_ID */
+  notifyChannelId?: string;
 }
 
 export type EventStatus = 'queued' | 'running' | 'done' | 'failed' | 'interrupted';
