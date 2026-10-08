@@ -15,7 +15,7 @@ import {
   ButtonStyle,
 } from 'discord.js';
 import { loadConfig } from './config.js';
-import { isGitHubAppEnabled } from './github-auth.js';
+import { getGitHubEnv, isGitHubAppEnabled } from './github-auth.js';
 import { resolveApproval, requestApproval, setApprovalEnabled } from './approval.js';
 import { getBackendDisplayName, type AgentRunner } from './agent-runner.js';
 import { BackendResolver } from './backend-resolver.js';
@@ -57,6 +57,7 @@ import { EventStore } from './event-store.js';
 import { GitHubIssueSource } from './event-source-github.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
+import { getSafeEnv } from './safe-env.js';
 dotenvConfig({ override: true });
 
 /** メッセージを指定文字数で分割（カスタムセパレータ対応、デフォルトは行単位） */
@@ -1220,7 +1221,13 @@ async function main() {
     } else if (!tmuxPath) {
       console.error('[xangi] Event polling disabled: tmux not found in PATH');
     } else {
-      eventLauncher = new TmuxLauncher({ tmuxPath, claudePath, cwd: workdir });
+      const safeEnv = getSafeEnv();
+      eventLauncher = new TmuxLauncher({
+        tmuxPath,
+        claudePath,
+        cwd: workdir,
+        sessionPath: { ...safeEnv, ...getGitHubEnv(safeEnv) }.PATH,
+      });
       console.log(`[xangi] Events launch ${claudePath} in tmux (cwd: ${workdir})`);
     }
   }

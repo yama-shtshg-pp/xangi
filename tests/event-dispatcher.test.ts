@@ -159,20 +159,16 @@ describe('EventDispatcher', () => {
     expect(messages().some((m) => m.includes('❌ 起動に失敗: o/a#1'))).toBe(true);
   });
 
-  it('同じ名前のセッションがすでにあれば起動せず、閉じられるまで起動中として数える', async () => {
+  it('同じ名前のセッションがすでにあれば起動せず、起動しなかったと記録して次に進む', async () => {
     events = [makeEvent(1), makeEvent(2)];
     alive.add('cc-a-issue1');
     launch.mockImplementationOnce(async () => ({ sessionName: 'cc-a-issue1', launched: false }));
-    const dispatcher = makeDispatcher();
 
-    await dispatcher.poll();
-    expect(launch).toHaveBeenCalledTimes(1);
-    expect(store.listByStatus('running')[0].sessionName).toBe('cc-a-issue1');
+    await makeDispatcher().poll();
+
+    expect(store.countByStatus('failed')).toBe(1);
+    expect(store.listByStatus('running').map((r) => r.event.id)).toEqual(['o/a#2']);
     expect(messages()[0]).toContain('⚠️ 同じ名前の tmux セッション cc-a-issue1');
-
-    alive.delete('cc-a-issue1');
-    await dispatcher.poll();
-    expect(launch).toHaveBeenCalledTimes(2);
   });
 
   it('セッションの有無を確かめられないときは起動中のままにし、次を起動しない', async () => {

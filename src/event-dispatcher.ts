@@ -237,12 +237,19 @@ export class EventDispatcher {
       return;
     }
 
-    // 同じ名前のセッションがすでにあれば起動しないが、そのセッションが閉じるまでは起動中として数える
+    if (!result.launched) {
+      // 誰かが同じ名前のセッションで作業している。そのセッションを起動中として扱うと、
+      // 閉じたときに Claude Code が見ていない issue を終了にしてしまうので、起動しなかったと記録する
+      const message = `tmux session ${result.sessionName} already exists`;
+      this.options.store.setStatus(event, 'failed', message);
+      await this.safeNotify(
+        `⚠️ 同じ名前の tmux セッション ${result.sessionName} があるため起動しませんでした: ${event.id} ${event.title}\n${event.url}`
+      );
+      return;
+    }
     this.options.store.setRunning(event, result.sessionName);
     await this.safeNotify(
-      result.launched
-        ? `🚀 起動しました: ${event.id} ${event.title}\n${event.url}\ntmux attach -t ${result.sessionName}`
-        : `⚠️ 同じ名前の tmux セッション ${result.sessionName} があるため起動せず、閉じられるまで待ちます: ${event.id}`
+      `🚀 起動しました: ${event.id} ${event.title}\n${event.url}\ntmux attach -t ${result.sessionName}`
     );
   }
 

@@ -20,8 +20,20 @@ import { getSafeEnv } from './safe-env.js';
 export type ExecFileFn = (
   file: string,
   args: string[],
-  options: { env: NodeJS.ProcessEnv }
+  options: { env: NodeJS.ProcessEnv; timeout: number }
 ) => Promise<{ stdout: string; stderr: string }>;
+
+/** tmux の呼び出しの上限。tmux が固まってもポーリング全体を止めない */
+const TMUX_TIMEOUT_MS = 10_000;
+/** 起動してから、claude がすぐに終了していないかを確かめるまでの時間 */
+const DEFAULT_STARTUP_CHECK_MS = 5_000;
+
+/** has-session が「セッションがない」ときに出すメッセージ（ほかのエラーと見分ける） */
+const NO_SESSION_PATTERNS = [
+  /can't find session/,
+  /no server running/,
+  /error connecting to .*\(No such file or directory\)/,
+];
 
 const execFileAsync: ExecFileFn = promisify(execFile);
 
@@ -75,19 +87,32 @@ export interface TmuxLauncherOptions {
   claudePath: string;
   /** Claude Code の作業ディレクトリ */
   cwd: string;
+  /** セッションの PATH（GitHub App のラッパーを含める）。未指定なら getSafeEnv() の PATH */
+  sessionPath?: string;
+  /** 起動してから、すぐに終了していないかを確かめるまでの時間 */
+  startupCheckMs?: number;
   exec?: ExecFileFn;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export class TmuxLauncher {
   private exec: ExecFileFn;
+  private sleep: (ms: number) => Promise<void>;
 
   constructor(private options: TmuxLauncherOptions) {
     this.exec = options.exec ?? execFileAsync;
+    this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
   private run(args: string[]) {
-    // tmux のサーバーを xangi が立ち上げた場合も、シークレットを Claude Code に渡さない
-    return this.exec(this.options.tmuxPath, args, { env: getSafeEnv() });
+    // tmux のクライアントに渡す環境変数。tmux のサーバーを xangi が立ち上げる場合に、
+    // xangi のシークレットをサーバーへ持ち込まない。
+    // 新しいセッションの PATH はクライアントのものになり、ほかの変数はサーバーのものを引き継ぐ
+    const env = getSafeEnv();
+    if (this.options.sessionPath) env.PATH = this.options.sessionPath;
+    // TMUX_TMPDIR が違うと別のサーバーに接続し、人が `tmux attach` で見つけられなくなる
+    if (process.env.TMUX_TMPDIR) env.TMUX_TMPDIR = process.env.TMUX_TMPDIR;
+    return this.exec(this.options.tmuxPath, args, { env, timeout: TMUX_TIMEOUT_MS });
   }
 
   /** 同じ名前の tmux セッションがあるか */
@@ -97,8 +122,9 @@ export class TmuxLauncher {
       await this.run(['has-session', '-t', `=${name}`]);
       return true;
     } catch (err) {
-      // セッションがない・tmux のサーバーが動いていないときは終了コード 1 になる
-      if (typeof (err as { code?: unknown }).code === 'number') return false;
+      // セッションがない・サーバーが動いていないときだけ false。ほかのエラーを「閉じた」と取り違えない
+      const stderr = String((err as { stderr?: unknown }).stderr ?? '');
+      if (NO_SESSION_PATTERNS.some((pattern) => pattern.test(stderr))) return false;
       throw err;
     }
   }
@@ -106,6 +132,7 @@ export class TmuxLauncher {
   /**
    * tmux の新しいセッションで Claude Code を起動する
    * @returns 起動したら true。同じ名前のセッションがすでにあれば起動せず false
+   * @throws claude が起動してすぐに終了したとき（認証エラーなど）
    */
   async launch(name: string, prompt: string): Promise<boolean> {
     if (await this.hasSession(name)) return false;
@@ -124,6 +151,13 @@ export class TmuxLauncher {
       name,
       prompt,
     ]);
+    // new-session はセッションを作った時点で成功する。すぐに終わったものを「人が閉じた」と取り違えない
+    await this.sleep(this.options.startupCheckMs ?? DEFAULT_STARTUP_CHECK_MS);
+    if (!(await this.hasSession(name))) {
+      throw new Error(
+        `claude exited right after launch. Run it in ${this.options.cwd} by hand to see the error`
+      );
+    }
     return true;
   }
 }
