@@ -83,17 +83,17 @@ describe('EventStore', () => {
     expect(store.countByStatus('failed')).toBe(0);
   });
 
-  it('起動中のまま残ったイベントは interrupted にして返す（再実行しない）', () => {
+  it('起動中にしたイベントは tmux のセッション名を残し、読み直しても消えない', () => {
     const event = makeEvent('o/r#1');
     const store = new EventStore(path);
     store.enqueue(event);
-    store.setStatus(event, 'running');
+    store.setRunning(event, 'cc-r-issue1');
 
     const reloaded = new EventStore(path);
-    expect(reloaded.markInterrupted()).toEqual([event]);
-    expect(reloaded.countByStatus('interrupted')).toBe(1);
+    const running = reloaded.listByStatus('running');
+    expect(running).toHaveLength(1);
+    expect(running[0].sessionName).toBe('cc-r-issue1');
     expect(reloaded.nextQueued()).toBeUndefined();
-    expect(new EventStore(path).countByStatus('interrupted')).toBe(1);
   });
 
   it('壊れたファイルは空から始めずに例外を投げ、ファイルには触らない', () => {

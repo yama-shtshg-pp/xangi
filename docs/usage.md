@@ -218,8 +218,9 @@ npx tsx src/schedule-cli.ts toggle --channel <channelId> 1
 
 ## GitHub issue からの起動
 
-指定したリポジトリに `agent` ラベルの付いた issue があると、xangi が Claude Code を起動して対応させます。
+指定したリポジトリに `agent` ラベルの付いた issue があると、xangi が tmux の中で対話モードの Claude Code を起動します。
 チャットで話しかけなくても、issue をきっかけに動きます。
+xangi が受け持つのは起動までです。起動したあとのやり取りは、人が Claude Code と直接行います。
 
 ### 設定
 
@@ -232,30 +233,72 @@ EVENT_NOTIFY_CHANNEL_ID=123456789012345678
 - xangi は `gh issue list` で、open で `agent` ラベルの付いた issue を 5 分ごとに取ります
   - `gh` は xangi を動かしているユーザーの認証をそのまま使います
   - Webhook は使わないので、マシンを外部に公開する必要はありません
-- 起動した Claude Code は issue を読み、対応が要らなければ理由をコメントして終わります
-- 対応する場合は、Claude Code が `gh` で issue にコメントするか PR を作ります
-- 起動・完了・失敗は `EVENT_NOTIFY_CHANNEL_ID` の Discord チャンネルに通知されます
+- 起動・終了・失敗はログに出ます
+  - Discord が有効で `EVENT_NOTIFY_CHANNEL_ID` があれば、そのチャンネルにも通知します
+
+### チャットなしで動かす
+
+Discord・Slack・Web チャットを設定しなくても、イベント源だけで xangi を起動できます。
+既存の Bot と同じトークンを使うと同じメッセージに 2 つのインスタンスが返事をするので、イベント専用のインスタンスはチャットを設定せずに動かします。
+
+```bash
+EVENTS_ENABLED=true
+EVENT_GITHUB_REPOS=owner/repo-a
+# DISCORD_TOKEN / SLACK_* / WEB_CHAT_ENABLED は設定しない
+# claude が PATH にないときだけ指定する
+# EVENT_CLAUDE_PATH=/Users/you/.local/bin/claude
+```
+
+- Discord が無効なときは、承認サーバーを起動しません。ほかのインスタンスとポートを取り合いません
+- `claude` か `tmux` が見つからないときは、イベントからの起動を止めます
+  - チャットも無効なら、xangi はエラーで終了します
+- `claude` はエイリアスを通さず、絶対パスで起動します
+  - シェルのエイリアスに `--dangerously-skip-permissions` を入れていても、許可の確認はいつもどおり出ます
+
+### 起動のしかた
+
+issue ごとに、次の名前で tmux のセッションを作り、Claude Code を起動します。
+
+```bash
+tmux new-session -d -s cc-<リポジトリ名>-issue<番号> -c <ワークスペース> -- \
+  claude -n cc-<リポジトリ名>-issue<番号> --remote-control cc-<リポジトリ名>-issue<番号> "<issue の内容>"
+```
+
+- セッション名の中で tmux が使えない文字（`.` や `:`）は `-` に置き換えます
+- issue の内容は最初のプロンプトとして渡します。シェルは通さないので、本文の `$()` などは実行されません
+- 作業ディレクトリは xangi のワークスペース（`WORKSPACE_PATH`）です
+  - Claude Code に信頼済みのフォルダにしておいてください。信頼の確認が出ると、そこで止まります
+- 許可の確認と入力待ちの通知は、Claude Code の Remote Control とプッシュ通知に任せます
+
+起動したセッションには、tmux でつなぐか、スマホなどの Remote Control からセッション名（例 `cc-xangi-issue14`）を選んでつなぎます。
+
+```bash
+tmux attach -t cc-xangi-issue14
+```
 
 ### 起動のルール
 
 - 同じ issue では 1 回しか起動しません。ラベルを付け直しても、xangi を再起動しても同じです
+- tmux のセッションがある間は起動中、なくなったら終了として記録します
+  - 作業が終わったかどうかは判定しません。セッションを閉じたら終了とみなします
+  - xangi はポーリングのたびに、起動中のセッションがあるかを確かめます
+- 同じ名前の tmux セッションがすでにあれば起動せず、そのセッションが閉じるまで起動中として数えます
 - 1 分間の load average を CPU コア数で割った値が `EVENT_MAX_LOAD` を超えている間は起動しません
   - そのあいだ issue はキューで待ち、負荷が下がったあとのポーリングで古い順に起動します
-- 同時に起動するのは `EVENT_MAX_CONCURRENT` 件までです
-- issue ごとに専用のプロセスと新しいセッションで起動するので、チャンネルの会話とは混ざりません
-- 起動中に xangi が止まった issue は、再起動後に通知だけして再実行しません
+- 同時に起動するのは `EVENT_MAX_CONCURRENT` 件までです。起動中のセッションの数で数えます
+- xangi を再起動したとき、セッションが残っていれば起動中のまま扱います。なければ終了にします
 
 ### 注意
 
 - `agent` ラベルを付けられるのは、リポジトリの triage 以上の権限を持つ人だけです
   - ラベルを付ける前に、issue の本文が自動で実行させてよい内容かを確かめてください
-- 許可確認は `SKIP_PERMISSIONS` の設定に従います。危険なコマンドの承認フローもそのまま使われます
+- 閉じ忘れたセッションは残り続け、同時起動数を使います。終わったら閉じてください
 
 ### データ保存
 
 受け付けた issue と状態は `${DATA_DIR}/events.json` に保存されます。
 
-- このファイルが読めないときは、GitHub issue からの起動を止めて Discord に通知します
+- このファイルが読めないときは、GitHub issue からの起動を止めてログに出します（Discord が有効なら通知もします）
   - 空の記録から始めると、ラベルの付いた issue をすべて起動し直してしまうためです
   - ファイルを直すか、消してよいと確かめてから xangi を再起動してください
 
@@ -788,7 +831,8 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `EVENT_POLL_INTERVAL_SEC` | ポーリングの間隔（秒） | `300` |
 | `EVENT_MAX_LOAD` | 起動してよい負荷の上限（1 分間の load average ÷ CPU コア数） | `0.8` |
 | `EVENT_MAX_CONCURRENT` | 同時に起動する数の上限 | `1` |
-| `EVENT_NOTIFY_CHANNEL_ID` | 起動・完了・失敗を通知する Discord チャンネル | - |
+| `EVENT_NOTIFY_CHANNEL_ID` | 起動・終了・失敗を通知する Discord チャンネル | - |
+| `EVENT_CLAUDE_PATH` | イベントから起動する `claude` のパス | PATH から探す |
 
 ### GitHub App認証（オプション）
 

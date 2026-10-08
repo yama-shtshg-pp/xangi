@@ -56,6 +56,7 @@ import { startWebChat } from './web-chat.js';
 import { EventStore } from './event-store.js';
 import { GitHubIssueSource } from './event-source-github.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
+import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
 dotenvConfig({ override: true });
 
 /** メッセージを指定文字数で分割（カスタムセパレータ対応、デフォルトは行単位） */
@@ -381,6 +382,7 @@ async function main() {
     console.log(`[xangi] Ready! Logged in as ${c.user.tag}`);
 
     // ツール承認サーバー起動（Claude Code PreToolUseフック用）
+    // Discord が無効なら ClientReady が来ないので起動しない（ほかのインスタンスとポートを取り合わない）
     const { startApprovalServer } = await import('./approval-server.js');
     startApprovalServer(async (toolName, toolInput, dangerDescription) => {
       // 最初のauto-replyチャンネルに承認メッセージを送信
@@ -1205,10 +1207,28 @@ async function main() {
     console.log('[xangi] Slack bot started');
   }
 
+  // イベント源（GitHub issue など）。claude と tmux が見つからなければ使えない
+  const eventConfig = loadEventConfig();
+  let eventLauncher: TmuxLauncher | undefined;
+  if (eventConfig.enabled) {
+    const claudePath = resolveCommandPath(eventConfig.claudePath ?? 'claude');
+    const tmuxPath = resolveCommandPath('tmux');
+    if (!claudePath) {
+      console.error(
+        `[xangi] Event polling disabled: claude not found (${eventConfig.claudePath ?? 'PATH'}). Set EVENT_CLAUDE_PATH`
+      );
+    } else if (!tmuxPath) {
+      console.error('[xangi] Event polling disabled: tmux not found in PATH');
+    } else {
+      eventLauncher = new TmuxLauncher({ tmuxPath, claudePath, cwd: workdir });
+      console.log(`[xangi] Events launch ${claudePath} in tmux (cwd: ${workdir})`);
+    }
+  }
+
   const webChatEnabled = process.env.WEB_CHAT_ENABLED === 'true';
-  if (!config.discord.enabled && !config.slack.enabled && !webChatEnabled) {
+  if (!config.discord.enabled && !config.slack.enabled && !webChatEnabled && !eventLauncher) {
     console.error(
-      '[xangi] No chat platform enabled. Set DISCORD_TOKEN, SLACK_BOT_TOKEN/SLACK_APP_TOKEN, or WEB_CHAT_ENABLED=true'
+      '[xangi] No chat platform or event source enabled. Set DISCORD_TOKEN, SLACK_BOT_TOKEN/SLACK_APP_TOKEN, WEB_CHAT_ENABLED=true, or EVENTS_ENABLED=true'
     );
     process.exit(1);
   }
@@ -1216,10 +1236,10 @@ async function main() {
   // スケジューラの全ジョブを開始
   scheduler.startAll(config.scheduler);
 
-  // イベント源（GitHub issue など）のポーリングを開始
-  const eventConfig = loadEventConfig();
+  // イベント源のポーリングを開始
   let eventDispatcher: EventDispatcher | undefined;
-  if (eventConfig.enabled) {
+  if (eventLauncher) {
+    const launcher = eventLauncher;
     const notifyChannelId = eventConfig.notifyChannelId;
     const notifyEvent = async (message: string) => {
       console.log(`[events] ${message.split('\n')[0]}`);
@@ -1249,20 +1269,13 @@ async function main() {
         maxConcurrent: eventConfig.maxConcurrent,
         isLoadAcceptable: () => isLoadAcceptable(eventConfig.maxLoadPerCpu),
         notify: notifyEvent,
-        run: async (prompt, event) => {
-          // イベントごとに専用のプロセス・新しいセッションで起動し、チャンネルの会話と混ぜない
-          const runChannelId = `event:${event.source}:${event.id}`;
-          try {
-            const { result } = await agentRunner.run(prompt, {
-              skipPermissions: config.agent.config.skipPermissions ?? false,
-              sessionId: undefined,
-              channelId: runChannelId,
-            });
-            return result;
-          } finally {
-            agentRunner.destroy?.(runChannelId);
-          }
+        launch: async (prompt, event) => {
+          // issue ごとに tmux のセッションを分け、チャンネルの会話とは混ぜない
+          const sessionName = toSessionName(event);
+          const launched = await launcher.launch(sessionName, prompt);
+          return { sessionName, launched };
         },
+        isAlive: (sessionName) => launcher.hasSession(sessionName),
       });
       // 初回のポーリング（gh の呼び出し）で起動処理を待たせない
       eventDispatcher.start(eventConfig.pollIntervalMs).catch((err) => {
