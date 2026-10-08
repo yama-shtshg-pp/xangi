@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 describe('config', () => {
   const originalEnv = process.env;
@@ -19,6 +19,32 @@ describe('config', () => {
     // キャッシュをクリアして再インポート
     const { loadConfig } = await import('../src/config.js');
     expect(() => loadConfig()).toThrow('DISCORD_TOKEN');
+  });
+
+  it('チャットがなくても、イベント源が有効なら起動できる', async () => {
+    delete process.env.DISCORD_TOKEN;
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.WEB_CHAT_ENABLED;
+    process.env.EVENTS_ENABLED = 'true';
+    process.env.EVENT_GITHUB_REPOS = 'o/a';
+
+    const { loadConfig } = await import('../src/config.js');
+    const config = loadConfig();
+    expect(config.discord.enabled).toBe(false);
+    expect(config.slack.enabled).toBe(false);
+  });
+
+  it('チャットもイベント源もなければ、EVENTS_ENABLED も案内して失敗する', async () => {
+    delete process.env.DISCORD_TOKEN;
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.WEB_CHAT_ENABLED;
+    process.env.EVENTS_ENABLED = 'true';
+    delete process.env.EVENT_GITHUB_REPOS;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { loadConfig } = await import('../src/config.js');
+    expect(() => loadConfig()).toThrow('EVENTS_ENABLED');
+    warn.mockRestore();
   });
 
   it('should load Discord config when DISCORD_TOKEN is set', async () => {

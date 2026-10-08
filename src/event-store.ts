@@ -5,8 +5,8 @@
  * 一度記録したイベントは、状態にかかわらず二度と受け付けない（同じ issue で 2 回起動しない）。
  *
  * Why: xangi の再起動をまたいでも二重起動しないよう、状態はファイルに残す。
- * 起動中（running）のまま再起動したイベントは、途中で止まった可能性があるが
- * 自動では再実行しない（interrupted にして通知だけする）。重複実行の方が困るため。
+ * 起動中（running）のイベントは tmux のセッション名を持ち、セッションがなくなったら終了とみなす。
+ * xangi を再起動しても、セッションが残っていれば起動中のまま扱い、自動では再実行しない。
  * 同じ理由で、ファイルが読めないときは空から始めずに例外を投げる
  * （空から始めると、ラベルの付いた issue をすべて起動し直してしまう）。
  */
@@ -33,6 +33,8 @@ export interface EventRecord {
   receivedAt: string;
   updatedAt: string;
   error?: string;
+  /** 起動した tmux のセッション名（running のとき） */
+  sessionName?: string;
 }
 
 export class EventStore {
@@ -110,19 +112,15 @@ export class EventStore {
     this.save();
   }
 
-  /**
-   * 起動中のまま残っていたイベントを interrupted にする（起動時に 1 回呼ぶ）
-   * @returns interrupted にしたイベント
-   */
-  markInterrupted(): AgentEvent[] {
-    const interrupted: AgentEvent[] = [];
-    for (const record of this.records.values()) {
-      if (record.status !== 'running') continue;
-      record.status = 'interrupted';
-      record.updatedAt = new Date().toISOString();
-      interrupted.push(record.event);
-    }
-    if (interrupted.length > 0) this.save();
-    return interrupted;
+  listByStatus(status: EventStatus): EventRecord[] {
+    return Array.from(this.records.values()).filter((record) => record.status === status);
+  }
+
+  /** 起動中にし、tmux のセッション名を残す */
+  setRunning(event: Pick<AgentEvent, 'source' | 'id'>, sessionName: string): void {
+    const record = this.records.get(this.key(event));
+    if (!record) return;
+    record.sessionName = sessionName;
+    this.setStatus(event, 'running');
   }
 }
