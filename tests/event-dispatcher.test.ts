@@ -326,6 +326,7 @@ describe('loadEventConfig', () => {
       maxConcurrent: 1,
       notifyChannelId: undefined,
       claudePath: undefined,
+      wakeChannelId: undefined,
     });
   });
 
@@ -340,6 +341,7 @@ describe('loadEventConfig', () => {
         EVENT_MAX_CONCURRENT: '2',
         EVENT_NOTIFY_CHANNEL_ID: '123',
         EVENT_CLAUDE_PATH: '/opt/bin/claude',
+        EVENT_WAKE_CHANNEL_ID: ' C123 ',
       })
     ).toEqual({
       enabled: true,
@@ -350,6 +352,7 @@ describe('loadEventConfig', () => {
       maxConcurrent: 2,
       notifyChannelId: '123',
       claudePath: '/opt/bin/claude',
+      wakeChannelId: 'C123',
     });
   });
 
@@ -376,5 +379,99 @@ describe('loadEventConfig', () => {
     const config = loadEventConfig({ EVENT_POLL_INTERVAL_SEC: 'abc', EVENT_MAX_CONCURRENT: '0' });
     expect(config.pollIntervalMs).toBe(300_000);
     expect(config.maxConcurrent).toBe(1);
+  });
+});
+
+describe('EventDispatcher.wake', () => {
+  let dir: string;
+  let store: EventStore;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    dir = mkdtempSync(join(tmpdir(), 'event-dispatcher-wake-'));
+    store = new EventStore(join(dir, 'events.json'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeDispatcher(poll: EventSource['poll']) {
+    return new EventDispatcher({
+      sources: [{ name: 'fake', poll }],
+      store,
+      launch: async (_prompt, event) => ({ sessionName: event.id, launched: true }),
+      isAlive: async () => true,
+      notify: async () => {},
+      maxConcurrent: 1,
+      isLoadAcceptable: () => true,
+      wakeDelayMs: 1000,
+    });
+  }
+
+  it('合図を受けたら、待ち時間のあとにポーリングし、イベントを起動する', async () => {
+    const poll = vi.fn(async () => [makeEvent(1)]);
+    const dispatcher = makeDispatcher(poll);
+
+    dispatcher.wake();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(poll).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(store.listByStatus('running')).toHaveLength(1);
+  });
+
+  it('待ち時間の間に続いた合図は、1 回のポーリングにまとめる', async () => {
+    const poll = vi.fn(async () => []);
+    const dispatcher = makeDispatcher(poll);
+
+    dispatcher.wake();
+    await vi.advanceTimersByTimeAsync(500);
+    dispatcher.wake();
+    dispatcher.wake();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+
+  it('ポーリング中に合図が来たら、終わったあとにもう 1 回ポーリングする', async () => {
+    let release!: () => void;
+    const poll = vi
+      .fn<EventSource['poll']>()
+      .mockImplementationOnce(() => new Promise((resolve) => (release = () => resolve([]))))
+      .mockResolvedValue([makeEvent(2)]);
+    const dispatcher = makeDispatcher(poll);
+
+    const first = dispatcher.poll();
+    dispatcher.wake();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(poll).toHaveBeenCalledTimes(1);
+
+    release();
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poll).toHaveBeenCalledTimes(2);
+    expect(store.listByStatus('running').map((r) => r.event.id)).toEqual(['o/a#2']);
+  });
+
+  it('ポーリング中に合図がなければ、終わったあとにポーリングし直さない', async () => {
+    const poll = vi.fn(async () => []);
+    const dispatcher = makeDispatcher(poll);
+
+    await dispatcher.poll();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop したら、待っている合図のポーリングもしない', async () => {
+    const poll = vi.fn(async () => []);
+    const dispatcher = makeDispatcher(poll);
+
+    dispatcher.wake();
+    dispatcher.stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(poll).not.toHaveBeenCalled();
   });
 });

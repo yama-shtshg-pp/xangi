@@ -249,6 +249,21 @@ export interface SlackChannelOptions {
   skills: Skill[];
   reloadSkills: () => Skill[];
   scheduler?: Scheduler;
+  /** 投稿があったら onWake を呼ぶチャンネル。このチャンネルの投稿には返事をしない */
+  eventWake?: { channelId: string; onWake: () => void };
+}
+
+/**
+ * 合図のチャンネルの投稿なら onWake を呼んで true を返す（呼び出し側はそこで処理を終える）
+ * Bot の投稿（GitHub アプリなど）も合図にするので、Bot を捨てる処理より前で呼ぶ
+ */
+export function handleEventWake(
+  channelId: string | undefined,
+  eventWake: SlackChannelOptions['eventWake']
+): boolean {
+  if (!eventWake || channelId !== eventWake.channelId) return false;
+  eventWake.onWake();
+  return true;
 }
 
 export async function startSlackBot(options: SlackChannelOptions): Promise<void> {
@@ -315,6 +330,8 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
 
   // メンション時の処理
   app.event('app_mention', async ({ event, say, client }) => {
+    // 合図のチャンネルでは、メンションされても会話として扱わない（合図は message イベントで受ける）
+    if (options.eventWake && event.channel === options.eventWake.channelId) return;
     const userId = event.user;
     if (!userId) return;
 
@@ -399,6 +416,8 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
 
   // DMの処理 + autoReplyChannels
   app.event('message', async ({ event, say, client }) => {
+    if (handleEventWake(event.channel, options.eventWake)) return;
+
     // botのメッセージは無視
     if ('bot_id' in event || !('user' in event)) return;
 
