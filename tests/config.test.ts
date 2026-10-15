@@ -1,15 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 describe('config', () => {
   const originalEnv = process.env;
+  let dataDir: string;
 
   beforeEach(() => {
     // 環境変数をリセット
     process.env = { ...originalEnv };
+    // 手元の DATA_DIR にあるウォッチリストを拾わない
+    dataDir = mkdtempSync(join(tmpdir(), 'config-'));
+    process.env.DATA_DIR = dataDir;
   });
 
   afterEach(() => {
     process.env = originalEnv;
+    rmSync(dataDir, { recursive: true, force: true });
   });
 
   it('should throw error when no tokens are set', async () => {
@@ -32,6 +40,18 @@ describe('config', () => {
     const config = loadConfig();
     expect(config.discord.enabled).toBe(false);
     expect(config.slack.enabled).toBe(false);
+  });
+
+  it('チャットがなくても、ウォッチリストがあれば EVENT_GITHUB_REPOS なしで起動できる', async () => {
+    delete process.env.DISCORD_TOKEN;
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.WEB_CHAT_ENABLED;
+    delete process.env.EVENT_GITHUB_REPOS;
+    process.env.EVENTS_ENABLED = 'true';
+    writeFileSync(join(dataDir, 'watch-repos.json'), '{"repos":[]}');
+
+    const { loadConfig } = await import('../src/config.js');
+    expect(loadConfig().discord.enabled).toBe(false);
   });
 
   it('チャットもイベント源もなければ、EVENTS_ENABLED も案内して失敗する', async () => {

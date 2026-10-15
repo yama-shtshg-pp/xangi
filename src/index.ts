@@ -50,13 +50,15 @@ import {
   incrementMessageCount,
   getActiveSessionId,
 } from './sessions.js';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { config as dotenvConfig } from 'dotenv';
 import { startWebChat } from './web-chat.js';
 import { EventStore } from './event-store.js';
-import { GitHubIssueSource } from './event-source-github.js';
+import { GitHubIssueSource, type RepoTarget } from './event-source-github.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
+import { WATCH_REPOS_FILE, WatchRepoList, getWatchListPath } from './watch-repos.js';
 import { getSafeEnv } from './safe-env.js';
 dotenvConfig({ override: true });
 
@@ -1209,7 +1211,22 @@ async function main() {
   }
 
   // イベント源（GitHub issue など）。claude と tmux が見つからなければ使えない
-  const eventConfig = loadEventConfig();
+  const watchListPath = getWatchListPath();
+  const eventConfig = loadEventConfig(process.env, existsSync(watchListPath));
+  // 通知はウォッチリストの項目ごとの通知先を優先し、なければ EVENT_NOTIFY_CHANNEL_ID に送る
+  const notifyEvent = async (message: string, channelId = eventConfig.notifyChannelId) => {
+    console.log(`[events] ${message.split('\n')[0]}`);
+    if (!config.discord.enabled || !channelId) return;
+    const channel = await client.channels.fetch(channelId);
+    if (channel && 'send' in channel) {
+      await (channel as { send: (content: string) => Promise<unknown> }).send(message);
+    }
+  };
+  const watchList = new WatchRepoList({
+    filePath: watchListPath,
+    defaults: { label: eventConfig.githubLabel, notifyChannelId: eventConfig.notifyChannelId },
+    notify: notifyEvent,
+  });
   let eventLauncher: TmuxLauncher | undefined;
   if (eventConfig.enabled) {
     const claudePath = resolveCommandPath(eventConfig.claudePath ?? 'claude');
@@ -1247,14 +1264,13 @@ async function main() {
   let eventDispatcher: EventDispatcher | undefined;
   if (eventLauncher) {
     const launcher = eventLauncher;
-    const notifyChannelId = eventConfig.notifyChannelId;
-    const notifyEvent = async (message: string) => {
-      console.log(`[events] ${message.split('\n')[0]}`);
-      if (!config.discord.enabled || !notifyChannelId) return;
-      const channel = await client.channels.fetch(notifyChannelId);
-      if (channel && 'send' in channel) {
-        await (channel as { send: (content: string) => Promise<unknown> }).send(message);
+    // ポーリングのたびに決める。ウォッチリストがあればそれを使い、なければ EVENT_GITHUB_REPOS を使う
+    const listTargets = async (): Promise<RepoTarget[]> => {
+      if (watchList.exists()) return watchList.load();
+      if (eventConfig.githubRepos.length === 0) {
+        console.warn(`[xangi] ${WATCH_REPOS_FILE} not found and EVENT_GITHUB_REPOS is empty`);
       }
+      return eventConfig.githubRepos.map((repo) => ({ repo, label: eventConfig.githubLabel }));
     };
 
     let eventStore: EventStore | undefined;
@@ -1271,7 +1287,7 @@ async function main() {
 
     if (eventStore) {
       eventDispatcher = new EventDispatcher({
-        sources: [new GitHubIssueSource(eventConfig.githubRepos, eventConfig.githubLabel)],
+        sources: [new GitHubIssueSource(listTargets)],
         store: eventStore,
         maxConcurrent: eventConfig.maxConcurrent,
         isLoadAcceptable: () => isLoadAcceptable(eventConfig.maxLoadPerCpu),
@@ -1279,7 +1295,8 @@ async function main() {
         launch: async (prompt, event) => {
           // issue ごとに tmux のセッションを分け、チャンネルの会話とは混ぜない
           const sessionName = toSessionName(event);
-          const launched = await launcher.launch(sessionName, prompt);
+          // ウォッチリストから来た issue は、その項目のリポジトリで起動する
+          const launched = await launcher.launch(sessionName, prompt, event.workdir);
           return { sessionName, launched };
         },
         isAlive: (sessionName) => launcher.hasSession(sessionName),
@@ -1289,7 +1306,9 @@ async function main() {
         console.error('[xangi] Failed to start event polling:', err);
       });
       console.log(
-        `[xangi] Event polling started: ${eventConfig.githubRepos.join(', ')} (label: ${eventConfig.githubLabel})`
+        watchList.exists()
+          ? `[xangi] Event polling started: ${watchListPath}`
+          : `[xangi] Event polling started: ${eventConfig.githubRepos.join(', ')} (label: ${eventConfig.githubLabel})`
       );
     }
   }

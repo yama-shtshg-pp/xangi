@@ -103,6 +103,18 @@ describe('TmuxLauncher', () => {
     }
   });
 
+  it('作業ディレクトリを渡すと、そのディレクトリでセッションを作る', async () => {
+    const exec = vi
+      .fn()
+      .mockRejectedValueOnce(noSession())
+      .mockResolvedValueOnce(ok)
+      .mockResolvedValueOnce(ok);
+
+    expect(await makeLauncher(exec).launch('cc-a-issue1', 'p', '/repos/a')).toBe(true);
+    const args = exec.mock.calls[1][1] as string[];
+    expect(args[args.indexOf('-c') + 1]).toBe('/repos/a');
+  });
+
   it('新しいセッションで claude を対話モードで起動し、プロンプトはシェルを通さず 1 つの引数で渡す', async () => {
     const exec = vi
       .fn()

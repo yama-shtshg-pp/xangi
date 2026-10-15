@@ -85,7 +85,7 @@ export function resolveCommandPath(
 export interface TmuxLauncherOptions {
   tmuxPath: string;
   claudePath: string;
-  /** Claude Code の作業ディレクトリ */
+  /** Claude Code の作業ディレクトリ（launch で指定がないとき） */
   cwd: string;
   /** セッションの PATH（GitHub App のラッパーを含める）。未指定なら getSafeEnv() の PATH */
   sessionPath?: string;
@@ -131,10 +131,11 @@ export class TmuxLauncher {
 
   /**
    * tmux の新しいセッションで Claude Code を起動する
+   * @param cwd 作業ディレクトリ。未指定なら options.cwd
    * @returns 起動したら true。同じ名前のセッションがすでにあれば起動せず false
    * @throws claude が起動してすぐに終了したとき（認証エラーなど）
    */
-  async launch(name: string, prompt: string): Promise<boolean> {
+  async launch(name: string, prompt: string, cwd: string = this.options.cwd): Promise<boolean> {
     if (await this.hasSession(name)) return false;
     await this.run([
       'new-session',
@@ -142,7 +143,7 @@ export class TmuxLauncher {
       '-s',
       name,
       '-c',
-      this.options.cwd,
+      cwd,
       '--',
       this.options.claudePath,
       '-n',
@@ -155,7 +156,7 @@ export class TmuxLauncher {
     await this.sleep(this.options.startupCheckMs ?? DEFAULT_STARTUP_CHECK_MS);
     if (!(await this.hasSession(name))) {
       throw new Error(
-        `claude exited right after launch. Run it in ${this.options.cwd} by hand to see the error`
+        `claude exited right after launch. Run it in ${cwd} by hand to see the error`
       );
     }
     return true;

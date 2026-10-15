@@ -17,12 +17,15 @@ import type { AgentEvent, EventRecord, EventStore } from './event-store.js';
 
 export interface EventConfig {
   enabled: boolean;
+  /** EVENT_GITHUB_REPOS（ウォッチリストがないときだけ使う） */
   githubRepos: string[];
+  /** ウォッチリストの項目で label を省略したときにも使う */
   githubLabel: string;
   pollIntervalMs: number;
   /** 1 分間の load average を CPU コア数で割った値の上限 */
   maxLoadPerCpu: number;
   maxConcurrent: number;
+  /** ウォッチリストの項目で notifyChannelId を省略したときにも使う */
   notifyChannelId?: string;
   /** 起動する claude のパス（未指定なら PATH から探す） */
   claudePath?: string;
@@ -33,17 +36,26 @@ function parsePositiveNumber(value: string | undefined, fallback: number): numbe
   return value !== undefined && value.trim() !== '' && Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-export function loadEventConfig(env: NodeJS.ProcessEnv = process.env): EventConfig {
+/**
+ * @param hasWatchList `DATA_DIR/watch-repos.json` があるか。あれば EVENT_GITHUB_REPOS は使わない
+ */
+export function loadEventConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  hasWatchList = false
+): EventConfig {
   const githubRepos = (env.EVENT_GITHUB_REPOS ?? '')
     .split(',')
     .map((r) => r.trim())
     .filter(Boolean);
   let enabled = env.EVENTS_ENABLED === 'true';
-  if (enabled && githubRepos.length === 0) {
+  if (enabled && !hasWatchList && githubRepos.length === 0) {
     console.warn(
-      '[event-dispatcher] EVENTS_ENABLED=true but EVENT_GITHUB_REPOS is empty. Disabled.'
+      '[event-dispatcher] EVENTS_ENABLED=true but neither watch-repos.json nor EVENT_GITHUB_REPOS is set. Disabled.'
     );
     enabled = false;
+  }
+  if (enabled && hasWatchList && githubRepos.length > 0) {
+    console.warn('[event-dispatcher] watch-repos.json found. EVENT_GITHUB_REPOS is ignored.');
   }
   return {
     enabled,
@@ -108,8 +120,8 @@ export interface EventDispatcherOptions {
   launch: (prompt: string, event: AgentEvent) => Promise<LaunchResult>;
   /** tmux のセッションがまだあるか */
   isAlive: (sessionName: string) => Promise<boolean>;
-  /** 通知を送る。失敗しても処理は続ける */
-  notify: (message: string) => Promise<void>;
+  /** 通知を送る。channelId がなければ既定の通知先に送る。失敗しても処理は続ける */
+  notify: (message: string, channelId?: string) => Promise<void>;
   maxConcurrent: number;
   isLoadAcceptable: () => boolean;
 }
@@ -182,7 +194,8 @@ export class EventDispatcher {
         // セッション名のない記録（非対話モードで起動していたころのもの）は、確かめようがない
         this.options.store.setStatus(event, 'interrupted');
         await this.safeNotify(
-          `⚠️ 起動中のまま記録が残っていたため、再実行しません: ${event.id} ${event.title}\n${event.url}`
+          `⚠️ 起動中のまま記録が残っていたため、再実行しません: ${event.id} ${event.title}\n${event.url}`,
+          event.notifyChannelId
         );
         continue;
       }
@@ -198,7 +211,8 @@ export class EventDispatcher {
       this.options.store.setStatus(event, 'done');
       console.log(`[event-dispatcher] Session ${sessionName} closed (${event.source}:${event.id})`);
       await this.safeNotify(
-        `🏁 終了: ${event.id} ${event.title}（${sessionName} が閉じられました）`
+        `🏁 終了: ${event.id} ${event.title}（${sessionName} が閉じられました）`,
+        event.notifyChannelId
       );
     }
   }
@@ -232,7 +246,8 @@ export class EventDispatcher {
       const message = err instanceof Error ? err.message : String(err);
       this.options.store.setStatus(event, 'failed', message);
       await this.safeNotify(
-        `❌ 起動に失敗: ${event.id} ${event.title}\n${event.url}\n${message.slice(0, 200)}`
+        `❌ 起動に失敗: ${event.id} ${event.title}\n${event.url}\n${message.slice(0, 200)}`,
+        event.notifyChannelId
       );
       return;
     }
@@ -243,19 +258,21 @@ export class EventDispatcher {
       const message = `tmux session ${result.sessionName} already exists`;
       this.options.store.setStatus(event, 'failed', message);
       await this.safeNotify(
-        `⚠️ 同じ名前の tmux セッション ${result.sessionName} があるため起動しませんでした: ${event.id} ${event.title}\n${event.url}`
+        `⚠️ 同じ名前の tmux セッション ${result.sessionName} があるため起動しませんでした: ${event.id} ${event.title}\n${event.url}`,
+        event.notifyChannelId
       );
       return;
     }
     this.options.store.setRunning(event, result.sessionName);
     await this.safeNotify(
-      `🚀 起動しました: ${event.id} ${event.title}\n${event.url}\ntmux attach -t ${result.sessionName}`
+      `🚀 起動しました: ${event.id} ${event.title}\n${event.url}\ntmux attach -t ${result.sessionName}`,
+      event.notifyChannelId
     );
   }
 
-  private async safeNotify(message: string): Promise<void> {
+  private async safeNotify(message: string, channelId?: string): Promise<void> {
     try {
-      await this.options.notify(message);
+      await this.options.notify(message, channelId);
     } catch (err) {
       console.error(
         `[event-dispatcher] Notify failed: ${err instanceof Error ? err.message : String(err)}`
