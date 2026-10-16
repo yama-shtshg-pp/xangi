@@ -253,15 +253,42 @@ export interface SlackChannelOptions {
   eventWake?: { channelId: string; onWake: () => void };
 }
 
-/**
- * 合図のチャンネルの投稿なら onWake を呼んで true を返す（呼び出し側はそこで処理を終える）
- * Bot の投稿（GitHub アプリなど）も合図にするので、Bot を捨てる処理より前で呼ぶ
- */
-export function handleEventWake(
+export function isEventWakeChannel(
   channelId: string | undefined,
   eventWake: SlackChannelOptions['eventWake']
 ): boolean {
-  if (!eventWake || channelId !== eventWake.channelId) return false;
+  return !!eventWake && channelId === eventWake.channelId;
+}
+
+/** handleEventWake が見る message イベントの項目 */
+export interface WakeMessage {
+  channel?: string;
+  subtype?: string;
+  bot_id?: string;
+  user?: string;
+}
+
+/**
+ * 合図のチャンネルの投稿なら true を返す（呼び出し側はそこで処理を終え、AI には渡さない）
+ * 合図にするのは、Bot（GitHub アプリなど）か許可したユーザーの新しい投稿だけ
+ * Bot の投稿も合図にするので、Bot を捨てる処理より前で呼ぶ
+ */
+export function handleEventWake(
+  message: WakeMessage,
+  eventWake: SlackChannelOptions['eventWake'],
+  allowedUsers: string[]
+): boolean {
+  if (!eventWake || !isEventWakeChannel(message.channel, eventWake)) return false;
+  // 編集・削除・チャンネルへの参加などは issue の状態と関係ないので、ポーリングしない
+  if (message.subtype !== undefined && message.subtype !== 'bot_message') return true;
+  const fromBot = !!message.bot_id;
+  const fromAllowedUser =
+    allowedUsers.includes('*') || (!!message.user && allowedUsers.includes(message.user));
+  // チャンネルに入れる人なら誰でもポーリングを起こせると、GitHub API の上限を使い切られる
+  if (!fromBot && !fromAllowedUser) {
+    console.log(`[slack] Ignoring wake signal from unauthorized user: ${message.user}`);
+    return true;
+  }
   eventWake.onWake();
   return true;
 }
@@ -331,7 +358,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
   // メンション時の処理
   app.event('app_mention', async ({ event, say, client }) => {
     // 合図のチャンネルでは、メンションされても会話として扱わない（合図は message イベントで受ける）
-    if (options.eventWake && event.channel === options.eventWake.channelId) return;
+    if (isEventWakeChannel(event.channel, options.eventWake)) return;
     const userId = event.user;
     if (!userId) return;
 
@@ -416,7 +443,8 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
 
   // DMの処理 + autoReplyChannels
   app.event('message', async ({ event, say, client }) => {
-    if (handleEventWake(event.channel, options.eventWake)) return;
+    if (handleEventWake(event as WakeMessage, options.eventWake, config.slack.allowedUsers ?? []))
+      return;
 
     // botのメッセージは無視
     if ('bot_id' in event || !('user' in event)) return;

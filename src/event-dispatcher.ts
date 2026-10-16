@@ -148,6 +148,8 @@ export class EventDispatcher {
   private wakeTimer?: ReturnType<typeof setTimeout>;
   /** ポーリング中に合図が来たか。来ていたら、そのポーリングのあとにもう 1 回走らせる */
   private wakePending = false;
+  /** stop したあとは、合図や進行中のポーリングから次のポーリングを始めない */
+  private stopped = false;
 
   constructor(private options: EventDispatcherOptions) {}
 
@@ -165,6 +167,8 @@ export class EventDispatcher {
   }
 
   stop(): void {
+    this.stopped = true;
+    this.wakePending = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     if (this.wakeTimer) clearTimeout(this.wakeTimer);
@@ -176,7 +180,7 @@ export class EventDispatcher {
    * 合図の中身は見ない。何を起動するかはポーリングの結果で決める
    */
   wake(): void {
-    if (this.wakeTimer) return;
+    if (this.stopped || this.wakeTimer) return;
     this.wakeTimer = setTimeout(() => {
       this.wakeTimer = undefined;
       if (this.polling) {
@@ -213,7 +217,7 @@ export class EventDispatcher {
       await this.drain();
     } finally {
       this.polling = false;
-      if (this.wakePending) {
+      if (this.wakePending && !this.stopped) {
         this.wakePending = false;
         this.poll().catch((err) => logError('poll', err));
       }

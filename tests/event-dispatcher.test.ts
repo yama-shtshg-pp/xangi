@@ -465,6 +465,24 @@ describe('EventDispatcher.wake', () => {
     expect(poll).toHaveBeenCalledTimes(1);
   });
 
+  it('ポーリング中に合図が来ても、stop したら終わったあとにポーリングし直さない', async () => {
+    let release!: () => void;
+    const poll = vi
+      .fn<EventSource['poll']>()
+      .mockImplementationOnce(() => new Promise((resolve) => (release = () => resolve([]))))
+      .mockResolvedValue([]);
+    const dispatcher = makeDispatcher(poll);
+
+    const first = dispatcher.poll();
+    dispatcher.wake();
+    await vi.advanceTimersByTimeAsync(1000);
+    dispatcher.stop();
+    release();
+    await first;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+
   it('stop したら、待っている合図のポーリングもしない', async () => {
     const poll = vi.fn(async () => []);
     const dispatcher = makeDispatcher(poll);

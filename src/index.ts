@@ -1200,6 +1200,8 @@ async function main() {
   const eventConfig = loadEventConfig(process.env, existsSync(watchListPath));
   // Slack は EventDispatcher より先に起動するので、合図は作ったあとの dispatcher に渡す
   let eventDispatcher: EventDispatcher | undefined;
+  // dispatcher を作る前に来た合図。作ったあとに 1 回ポーリングする
+  let wakeBeforeDispatcher = false;
 
   // Slackボットを起動
   if (config.slack.enabled) {
@@ -1216,9 +1218,9 @@ async function main() {
         ? {
             channelId: eventConfig.wakeChannelId,
             onWake: () => {
-              if (!eventDispatcher) return;
               console.log('[events] Wake signal received');
-              eventDispatcher.wake();
+              if (eventDispatcher) eventDispatcher.wake();
+              else wakeBeforeDispatcher = true;
             },
           }
         : undefined,
@@ -1325,7 +1327,14 @@ async function main() {
           ? `[xangi] Event polling started: ${watchListPath}`
           : `[xangi] Event polling started: ${eventConfig.githubRepos.join(', ')} (label: ${eventConfig.githubLabel})`
       );
+      if (wakeBeforeDispatcher) eventDispatcher.wake();
     }
+  }
+  if (config.slack.enabled && eventConfig.wakeChannelId && !eventDispatcher) {
+    // 合図のチャンネルの投稿は AI に渡さずに捨てるので、ポーリングしないことを起動時に知らせる
+    console.warn(
+      '[xangi] EVENT_WAKE_CHANNEL_ID is set but event polling is disabled. Wake signals are ignored.'
+    );
   }
 
   // シャットダウン時にスケジューラを停止
