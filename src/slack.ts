@@ -242,6 +242,11 @@ async function deleteMessage(client: WebClient, channelId: string, arg: string):
 }
 
 import type { Scheduler } from './scheduler.js';
+import {
+  extractMessageText,
+  type SlackIssueCreator,
+  type SlackMessageLike,
+} from './slack-issue.js';
 
 export interface SlackChannelOptions {
   config: Config;
@@ -251,6 +256,11 @@ export interface SlackChannelOptions {
   scheduler?: Scheduler;
   /** 投稿があったら onWake を呼ぶチャンネル。このチャンネルの投稿には返事をしない */
   eventWake?: { channelId: string; onWake: () => void };
+  /**
+   * メンションから issue を立てる処理。undefined を返す間（イベントからの起動が無効なとき）は、
+   * これまでどおりメンションを会話として扱う
+   */
+  mentionIssue?: () => SlackIssueCreator | undefined;
 }
 
 export function isEventWakeChannel(
@@ -368,6 +378,48 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       return;
     }
 
+    const creator = options.mentionIssue?.();
+    if (creator) {
+      // スレッドの中なら親メッセージ（エラー通知など）を issue にする
+      const sourceTs = event.thread_ts ?? event.ts;
+      let reply: string;
+      try {
+        reply = await creator.handleMention({
+          text: event.text || '',
+          channel: event.channel,
+          ts: sourceTs,
+          inThread: !!event.thread_ts,
+          loadParentText: async () => {
+            const res = await client.conversations.replies({
+              channel: event.channel,
+              ts: sourceTs,
+              limit: 1,
+              inclusive: true,
+            });
+            const parent = res.messages?.[0];
+            return parent ? extractMessageText(parent as SlackMessageLike) : '';
+          },
+          getPermalink: async () => {
+            try {
+              const res = await client.chat.getPermalink({
+                channel: event.channel,
+                message_ts: sourceTs,
+              });
+              return res.permalink;
+            } catch (err) {
+              console.error('[slack] Failed to get permalink:', err);
+              return undefined;
+            }
+          },
+        });
+      } catch (err) {
+        console.error('[slack] Failed to create issue from mention:', err);
+        reply = `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      await say({ text: reply, thread_ts: sourceTs });
+      return;
+    }
+
     let text = (event.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
 
     // 添付ファイルをダウンロード
@@ -471,6 +523,13 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       console.log(
         `[slack] Skipping: isDM=${isDM}, isAutoReplyChannel=${isAutoReplyChannel}, isThread=${isThreadReply}`
       );
+      return;
+    }
+
+    // メンションから issue を立てるインスタンスでは、スレッドの返信を会話として扱わない
+    // （エラー通知のスレッドでのメンションは app_mention で受ける。会話にすると二重に動く）
+    if (!isDM && isThreadReply && options.mentionIssue?.()) {
+      console.log('[slack] Skipping thread reply (mention issue mode)');
       return;
     }
 

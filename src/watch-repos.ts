@@ -33,6 +33,8 @@ export interface WatchRepoEntry {
   label?: string;
   notifyChannelId?: string;
   enabled?: boolean;
+  /** Slack のメンションでリポジトリを選ぶときの番号や短い名前（例: "1"、"jra"） */
+  key?: string;
 }
 
 /** git を実行して標準出力を返す（テストで差し替える） */
@@ -117,7 +119,7 @@ export function locateJsonError(text: string): { line: number; column: number } 
   return { line: before.length, column: before[before.length - 1].length + 1 };
 }
 
-const STRING_FIELDS = ['path', 'remote', 'repo', 'label', 'notifyChannelId'] as const;
+const STRING_FIELDS = ['path', 'remote', 'repo', 'label', 'notifyChannelId', 'key'] as const;
 
 /**
  * ファイルの中身を検証して項目の一覧を返す
@@ -137,6 +139,7 @@ export function parseWatchRepos(text: string): WatchRepoEntry[] {
   if (!data || typeof data !== 'object' || !Array.isArray((data as { repos?: unknown }).repos)) {
     throw new Error('"repos" must be an array');
   }
+  const keys = new Map<string, number>();
   return (data as { repos: unknown[] }).repos.map((item, i) => {
     const where = `repos[${i}]`;
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
@@ -156,8 +159,23 @@ export function parseWatchRepos(text: string): WatchRepoEntry[] {
     if (typeof entry.repo === 'string' && !OWNER_REPO.test(entry.repo.trim())) {
       throw new Error(`${where}.repo must be owner/repo`);
     }
+    if (typeof entry.key === 'string') {
+      const key = normalizeKey(entry.key);
+      if (/\s/.test(key)) throw new Error(`${where}.key must not contain spaces`);
+      // 重複していると、メンションでどちらのリポジトリを選んだのかが定まらない
+      const first = keys.get(key);
+      if (first !== undefined) {
+        throw new Error(`${where}.key "${entry.key.trim()}" is already used by repos[${first}]`);
+      }
+      keys.set(key, i);
+    }
     return entry as unknown as WatchRepoEntry;
   });
+}
+
+/** key の比べ方（前後の空白と大文字・小文字を区別しない） */
+export function normalizeKey(key: string): string {
+  return key.trim().toLowerCase();
 }
 
 export interface WatchRepoDefaults {
@@ -229,6 +247,7 @@ export class WatchRepoList {
         label: entry.label?.trim() || this.options.defaults.label,
         workdir: expandHome(entry.path.trim(), this.options.home),
         notifyChannelId: channelId,
+        ...(entry.key ? { key: entry.key.trim() } : {}),
       });
     }
 

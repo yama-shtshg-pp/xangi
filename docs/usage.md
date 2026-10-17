@@ -259,6 +259,7 @@ EVENT_NOTIFY_CHANNEL_ID=123456789012345678
 | `label` | 起動の対象にするラベル | `EVENT_GITHUB_LABEL` |
 | `notifyChannelId` | 起動・終了・失敗の通知先 | `EVENT_NOTIFY_CHANNEL_ID` |
 | `enabled` | `false` にするとポーリングしません | `true` |
+| `key` | Slack のメンションでリポジトリを選ぶ番号や短い名前（[Slack のメンションから issue を立てる](#slack-のメンションから-issue-を立てる)） | - |
 
 - Claude Code は項目の `path` で起動します。そのリポジトリの `CLAUDE.md` や品質ゲートが最初から効きます
 - GitHub のリポジトリ名は、`git -C <path> remote get-url <remote>` の URL から読み取ります
@@ -349,6 +350,45 @@ GitHub アプリが Slack に流すのは、issue を立てたときなどです
 4. チャンネル ID を `EVENT_WAKE_CHANNEL_ID` に、トークンを `SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` に設定します
    - `SLACK_ALLOWED_USER` を設定しないと xangi は起動しません。自分のユーザー ID を入れてください
    - Slack だけを有効にしたときは承認サーバーを起動しないので、ほかのインスタンスとポートを取り合いません
+
+### Slack のメンションから issue を立てる
+
+エラー通知のスレッドで App をメンションすると、指定したリポジトリにラベル付きの issue を立てます。
+立てた issue は、ほかの issue と同じように確認で拾い、Claude Code を起動します。
+issue を立てたあとはすぐに確認するので、定期の確認を待ちません。
+
+メンションで選べるように、ウォッチリストの項目に `key` を書きます。携帯から打ちやすい番号や短い名前にします。
+
+```json
+{
+  "repos": [
+    { "path": "~/git_tmp/jra-data-api", "key": "1" },
+    { "path": "~/git_tmp/keiba-note", "key": "kn" }
+  ]
+}
+```
+
+| メンション | 動き |
+|---|---|
+| `@<App> 1`（スレッドの中） | 親メッセージの本文で、`key` が `1` のリポジトリに issue を立てます |
+| `@<App> 1 本文`（スレッドの外） | `key` のあとの本文で issue を立てます |
+| `@<App>` | `key` とリポジトリの対応表を返します。issue は立てません |
+
+- issue のタイトルは本文の最初の行で、先頭に `[Slack]` を付けます。本文には Slack のメッセージへのリンクを入れます
+  - Bot の通知は、attachments や blocks に入っている本文も取り出します
+- ラベルは、その項目の `label`（省略時は `EVENT_GITHUB_LABEL`）です。リポジトリにそのラベルがないと、issue を立てられません
+- 同じメッセージに 2 回メンションしても、issue は 1 つしか立てません。2 回目は 1 回目の issue の URL を返します
+  - メッセージと issue の対応は `DATA_DIR/slack-issues.json` に残します
+- `key` は大文字・小文字を区別しません。空白は入れられません。同じ `key` が 2 つあると、ウォッチリストのエラーになります
+- `SLACK_ALLOWED_USER` 以外のユーザーのメンションでは、issue を立てません
+- イベントからの起動（`EVENTS_ENABLED`）が無効なときは、これまでどおりメンションに AI が返事をします
+- イベントからの起動が有効なインスタンスでは、スレッドの返信を会話として扱いません。メンションだけを受けます
+
+Slack App には、合図用の設定に加えて次の設定が要ります。足したら App を再インストールしてください。
+
+- Event Subscriptions の bot events: `app_mention`
+- Bot Token Scopes: `app_mentions:read`、`chat:write`
+- エラー通知のチャンネルに `/invite @<App 名>` で App を招待します
 
 ### 起動のしかた
 
