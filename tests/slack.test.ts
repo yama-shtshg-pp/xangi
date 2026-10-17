@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handleEventWake, isEventWakeChannel } from '../src/slack.js';
+import { handleEventWake, isEventWakeChannel, shouldSkipThreadReply } from '../src/slack.js';
 
 describe('handleEventWake', () => {
   let onWake: ReturnType<typeof vi.fn>;
@@ -56,5 +56,32 @@ describe('isEventWakeChannel', () => {
     expect(isEventWakeChannel('C1', eventWake)).toBe(true);
     expect(isEventWakeChannel('C2', eventWake)).toBe(false);
     expect(isEventWakeChannel('C1', undefined)).toBe(false);
+  });
+});
+
+describe('shouldSkipThreadReply', () => {
+  const base = {
+    isDM: false,
+    isThreadReply: true,
+    isAutoReplyChannel: false,
+    mentionIssueMode: true,
+    text: 'メモ',
+  };
+
+  it('メンションから issue を立てるインスタンスでは、自動応答のチャンネル以外のスレッドの返信を会話にしない', () => {
+    expect(shouldSkipThreadReply(base)).toBe(true);
+  });
+
+  it('自動応答のチャンネルのスレッドでは会話を続け、メンションだけ app_mention に任せる', () => {
+    expect(shouldSkipThreadReply({ ...base, isAutoReplyChannel: true })).toBe(false);
+    expect(shouldSkipThreadReply({ ...base, isAutoReplyChannel: true, text: '<@U1> 1' })).toBe(
+      true
+    );
+  });
+
+  it('DM、スレッドの外、メンションから issue を立てないインスタンスでは会話にする', () => {
+    expect(shouldSkipThreadReply({ ...base, isDM: true })).toBe(false);
+    expect(shouldSkipThreadReply({ ...base, isThreadReply: false })).toBe(false);
+    expect(shouldSkipThreadReply({ ...base, mentionIssueMode: false })).toBe(false);
   });
 });

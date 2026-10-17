@@ -303,6 +303,22 @@ export function handleEventWake(
   return true;
 }
 
+/**
+ * メンションから issue を立てるインスタンスで、スレッドの返信を会話にしないか
+ * - 自動応答のチャンネル以外のスレッドの返信: エラー通知のスレッドに書いたメモに AI が返事をしてしまう
+ * - 自動応答のチャンネルのスレッドの中のメンション: app_mention で受けるので二重に処理しない
+ */
+export function shouldSkipThreadReply(message: {
+  isDM: boolean;
+  isThreadReply: boolean;
+  isAutoReplyChannel: boolean;
+  mentionIssueMode: boolean;
+  text: string;
+}): boolean {
+  if (message.isDM || !message.isThreadReply || !message.mentionIssueMode) return false;
+  return !message.isAutoReplyChannel || /<@[A-Z0-9]+>/i.test(message.text);
+}
+
 export async function startSlackBot(options: SlackChannelOptions): Promise<void> {
   const { config, agentRunner, reloadSkills } = options;
   let { skills } = options;
@@ -529,15 +545,16 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       return;
     }
 
-    // メンションから issue を立てるインスタンスでは、スレッドの中のメンションは app_mention で受ける
-    // （会話としても処理すると、エラー通知のスレッドで二重に動く）
     if (
-      !isDM &&
-      isThreadReply &&
-      options.mentionIssue?.() &&
-      /<@[A-Z0-9]+>/i.test(messageEvent.text || '')
+      shouldSkipThreadReply({
+        isDM,
+        isThreadReply,
+        isAutoReplyChannel: !!isAutoReplyChannel,
+        mentionIssueMode: !!options.mentionIssue?.(),
+        text: messageEvent.text || '',
+      })
     ) {
-      console.log('[slack] Skipping mention in thread (handled by app_mention)');
+      console.log('[slack] Skipping thread reply (mention issue mode)');
       return;
     }
 
