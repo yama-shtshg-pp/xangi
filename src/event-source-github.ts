@@ -28,6 +28,8 @@ export interface RepoTarget {
   workdir?: string;
   /** 通知先の Discord チャンネル。未指定なら EVENT_NOTIFY_CHANNEL_ID */
   notifyChannelId?: string;
+  /** Slack のメンションで選ぶときの番号や短い名前（ウォッチリストの key） */
+  key?: string;
 }
 
 /** 対象の一覧を返す。投げたらそのポーリングを飛ばす */
@@ -35,7 +37,7 @@ export type RepoTargetProvider = () => Promise<RepoTarget[]>;
 
 const execFileAsync = promisify(execFile);
 
-const defaultGhExec: GhExec = async (args) => {
+export const defaultGhExec: GhExec = async (args) => {
   const { stdout } = await execFileAsync('gh', args, {
     timeout: 30_000,
     maxBuffer: 10 * 1024 * 1024,

@@ -68,6 +68,13 @@ describe('parseWatchRepos', () => {
     ['{"repos":[{"path":"/a","label":1}]}', 'repos[0].label must be a non-empty string'],
     ['{"repos":[{"path":"/a","enabled":"no"}]}', 'repos[0].enabled must be true or false'],
     ['{"repos":[{"path":"/a","repo":"repo-only"}]}', 'repos[0].repo must be owner/repo'],
+    ['{"repos":[{"path":"/a","key":1}]}', 'repos[0].key must be a non-empty string'],
+    ['{"repos":[{"path":"/a","key":"a b"}]}', 'repos[0].key must be up to 16 letters'],
+    ['{"repos":[{"path":"/a","key":"日本"}]}', 'repos[0].key must be up to 16 letters'],
+    [
+      '{"repos":[{"path":"/a","key":"Jra"},{"path":"/b","key":" jra "}]}',
+      'repos[1].key "jra" is already used by repos[0]',
+    ],
   ])('形がおかしい: %s', (text, message) => {
     expect(() => parseWatchRepos(text)).toThrow(message);
   });
@@ -140,6 +147,12 @@ describe('WatchRepoList', () => {
       { repo: 'up/fork', label: 'bot', workdir: join(home, 'fork'), notifyChannelId: 'ch' },
     ]);
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('key を書いたら対象に入れる（前後の空白は除く）', async () => {
+    write([{ path: '~/a', key: ' 1 ' }, { path: '~/b' }]);
+    const targets = await makeList().load();
+    expect(targets.map((t) => t.key)).toEqual(['1', undefined]);
   });
 
   it('repo を書いたら remote から読み取らない', async () => {

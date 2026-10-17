@@ -57,6 +57,7 @@ import { startWebChat } from './web-chat.js';
 import { EventStore } from './event-store.js';
 import { GitHubIssueSource, type RepoTarget } from './event-source-github.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
+import { SlackIssueCreator, SlackIssueStore } from './slack-issue.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
 import { WATCH_REPOS_FILE, WatchRepoList, getWatchListPath } from './watch-repos.js';
 import { getSafeEnv } from './safe-env.js';
@@ -1202,6 +1203,8 @@ async function main() {
   let eventDispatcher: EventDispatcher | undefined;
   // dispatcher を作る前に来た合図。作ったあとに 1 回ポーリングする
   let wakeBeforeDispatcher = false;
+  // メンションから issue を立てる処理。dispatcher を作れたときだけ用意する
+  let slackIssueCreator: SlackIssueCreator | undefined;
 
   // Slackボットを起動
   if (config.slack.enabled) {
@@ -1224,6 +1227,7 @@ async function main() {
             },
           }
         : undefined,
+      mentionIssue: () => slackIssueCreator,
     });
     console.log('[xangi] Slack bot started');
   } else if (eventConfig.wakeChannelId) {
@@ -1328,6 +1332,27 @@ async function main() {
           : `[xangi] Event polling started: ${eventConfig.githubRepos.join(', ')} (label: ${eventConfig.githubLabel})`
       );
       if (wakeBeforeDispatcher) eventDispatcher.wake();
+
+      if (config.slack.enabled) {
+        const dispatcher = eventDispatcher;
+        try {
+          slackIssueCreator = new SlackIssueCreator({
+            store: new SlackIssueStore(join(dataDir, 'slack-issues.json')),
+            // key はウォッチリストにしか書けないので、EVENT_GITHUB_REPOS は使わない
+            listTargets: async () => {
+              if (!watchList.exists()) throw new Error(`${watchListPath} がありません`);
+              return watchList.load();
+            },
+            onCreated: () => dispatcher.wake(),
+          });
+          console.log('[xangi] Slack mentions create GitHub issues');
+        } catch (err) {
+          // 記録が読めないまま動くと、同じメッセージで issue を立て直してしまうので使わない
+          console.error(
+            `[xangi] Slack mention issues disabled: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
     }
   }
   if (config.slack.enabled && eventConfig.wakeChannelId && !eventDispatcher) {
