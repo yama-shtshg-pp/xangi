@@ -29,6 +29,8 @@ export interface EventConfig {
   notifyChannelId?: string;
   /** 起動する claude のパス（未指定なら PATH から探す） */
   claudePath?: string;
+  /** 投稿があったらすぐポーリングする Slack チャンネル（合図のチャンネル） */
+  wakeChannelId?: string;
 }
 
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
@@ -66,6 +68,7 @@ export function loadEventConfig(
     maxConcurrent: Math.floor(parsePositiveNumber(env.EVENT_MAX_CONCURRENT, 1)),
     notifyChannelId: env.EVENT_NOTIFY_CHANNEL_ID?.trim() || undefined,
     claudePath: env.EVENT_CLAUDE_PATH?.trim() || undefined,
+    wakeChannelId: env.EVENT_WAKE_CHANNEL_ID?.trim() || undefined,
   };
 }
 
@@ -124,7 +127,12 @@ export interface EventDispatcherOptions {
   notify: (message: string, channelId?: string) => Promise<void>;
   maxConcurrent: number;
   isLoadAcceptable: () => boolean;
+  /** 合図を受けてからポーリングするまで待つ時間。この間に来た合図は 1 回のポーリングにまとめる */
+  wakeDelayMs?: number;
 }
+
+/** GitHub アプリは 1 つの操作で複数の投稿をすることがあるので、少し待ってまとめる */
+const DEFAULT_WAKE_DELAY_MS = 3000;
 
 function logError(what: string, err: unknown): void {
   console.error(
@@ -137,6 +145,11 @@ export class EventDispatcher {
   private timer?: ReturnType<typeof setInterval>;
   /** 負荷が高くて待たせていることを通知済みか（負荷が下がったら戻す） */
   private deferNotified = false;
+  private wakeTimer?: ReturnType<typeof setTimeout>;
+  /** ポーリング中に合図が来たか。来ていたら、そのポーリングのあとにもう 1 回走らせる */
+  private wakePending = false;
+  /** stop したあとは、合図や進行中のポーリングから次のポーリングを始めない */
+  private stopped = false;
 
   constructor(private options: EventDispatcherOptions) {}
 
@@ -154,8 +167,29 @@ export class EventDispatcher {
   }
 
   stop(): void {
+    this.stopped = true;
+    this.wakePending = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.wakeTimer) clearTimeout(this.wakeTimer);
+    this.wakeTimer = undefined;
+  }
+
+  /**
+   * 合図を受けて、定期のポーリングを待たずにポーリングする
+   * 合図の中身は見ない。何を起動するかはポーリングの結果で決める
+   */
+  wake(): void {
+    if (this.stopped || this.wakeTimer) return;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = undefined;
+      if (this.polling) {
+        // いまのポーリングは合図より前に issue を読んだかもしれないので、終わったらもう 1 回読む
+        this.wakePending = true;
+        return;
+      }
+      this.poll().catch((err) => logError('poll', err));
+    }, this.options.wakeDelayMs ?? DEFAULT_WAKE_DELAY_MS);
   }
 
   /** 1 回分のポーリング。前回のポーリングが終わっていなければ何もしない */
@@ -183,6 +217,10 @@ export class EventDispatcher {
       await this.drain();
     } finally {
       this.polling = false;
+      if (this.wakePending && !this.stopped) {
+        this.wakePending = false;
+        this.poll().catch((err) => logError('poll', err));
+      }
     }
   }
 

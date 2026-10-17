@@ -301,6 +301,55 @@ EVENTS_ENABLED=true
 - `claude` はエイリアスを通さず、絶対パスで起動します
   - シェルのエイリアスに `--dangerously-skip-permissions` を入れていても、許可の確認はいつもどおり出ます
 
+### Slack の通知を合図にすぐ確認する
+
+定期の確認（ポーリング）は 5 分ごとなので、issue にラベルを付けてから起動するまで最大 5 分かかります。
+GitHub の通知を Slack のチャンネルに流すと、xangi はその投稿を合図に、定期の確認を待たずにウォッチリストの issue をすぐ確認します。
+確認の中身は定期の確認と同じで、各リポジトリに `gh issue list` を実行します。
+
+```bash
+EVENT_WAKE_CHANNEL_ID=C0123456789
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+SLACK_ALLOWED_USER=U0123456789
+```
+
+- 投稿の本文は読みません。何を起動するかは、これまでどおり確認の結果で決めます
+- 合図にするのは、Bot（GitHub アプリなど）と `SLACK_ALLOWED_USER` のユーザーの新しい投稿です
+  - ほかのユーザーの投稿や、投稿の編集・削除、チャンネルへの参加では確認しません
+- 合図から 3 秒待ってから確認します。その間に続いた投稿は 1 回の確認にまとめます
+- 確認の途中で合図が来たら、その確認が終わったあとにもう 1 回確認します
+- 合図のチャンネルの投稿には返事をしません。メンションされても AI には渡しません
+- 定期の確認はそのまま続きます
+- Slack が無効なときや、イベントからの起動が無効なときは、`EVENT_WAKE_CHANNEL_ID` を無視して起動時にログに出します
+
+GitHub アプリが Slack に流すのは、issue を立てたときなどです。既存の issue にあとからラベルを付けても、Slack には流れません（2026-10-17 に確かめました）。
+すぐ起動するのは、最初から `agent` を付けて立てた issue だけです。あとから付けた issue は定期の確認で拾うので、待ち時間を短くしたいときは `EVENT_POLL_INTERVAL_SEC` を短くしてください。
+
+- 例: `EVENT_POLL_INTERVAL_SEC=60` なら、1 時間に「60 回 × リポジトリの数」の `gh` を呼びます
+  - GitHub API の上限は 1 時間 5000 回です。同じアカウントのほかの `gh` と同じ枠を使います
+
+準備は次の順に行います。
+
+1. 合図用の Slack App を作ります。手順は [Slack セットアップガイド](slack-setup.md) のとおりですが、合図だけに使うなら次の設定で足ります
+   - Socket Mode を有効にし、App-Level Token（スコープ `connections:write`）を作ります
+   - Event Subscriptions の bot events に `message.channels` を追加します。非公開のチャンネルなら `message.groups` も追加します
+   - Bot Token Scopes に `channels:history` を追加します。非公開のチャンネルなら `groups:history` も追加します
+   - ほかの xangi と同じ App を使うと、同じメッセージに 2 つのインスタンスが返事をします。イベント専用のインスタンスには別の App を作ってください
+2. 合図用のチャンネル（例 `#github-events`）を作り、`/invite @<App 名>` で App を招待します
+   - `SLACK_AUTO_REPLY_CHANNELS` は設定しないでください。設定したチャンネルでは、イベント専用のインスタンスが会話に返事をします
+3. Slack に公式の GitHub アプリを入れ、合図用のチャンネルで次を実行します
+
+   ```text
+   /invite @GitHub
+   /github subscribe owner/repo issues
+   ```
+
+   - ウォッチリストのリポジトリごとに `subscribe` します
+4. チャンネル ID を `EVENT_WAKE_CHANNEL_ID` に、トークンを `SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` に設定します
+   - `SLACK_ALLOWED_USER` を設定しないと xangi は起動しません。自分のユーザー ID を入れてください
+   - Slack だけを有効にしたときは承認サーバーを起動しないので、ほかのインスタンスとポートを取り合いません
+
 ### 起動のしかた
 
 issue ごとに、次の名前で tmux のセッションを作り、Claude Code を起動します。
@@ -886,6 +935,7 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `EVENT_MAX_CONCURRENT` | 同時に起動する数の上限 | `1` |
 | `EVENT_NOTIFY_CHANNEL_ID` | 起動・終了・失敗を通知する Discord チャンネル（ウォッチリストの `notifyChannelId` の既定値） | - |
 | `EVENT_CLAUDE_PATH` | イベントから起動する `claude` のパス | PATH から探す |
+| `EVENT_WAKE_CHANNEL_ID` | 投稿を合図に、ウォッチリストの issue をすぐ確認する Slack チャンネル | - |
 
 ### GitHub App認証（オプション）
 

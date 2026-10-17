@@ -1195,6 +1195,14 @@ async function main() {
     });
   }
 
+  // イベント源（GitHub issue など）の設定。Slack の合図のチャンネルで使うので先に読む
+  const watchListPath = getWatchListPath();
+  const eventConfig = loadEventConfig(process.env, existsSync(watchListPath));
+  // Slack は EventDispatcher より先に起動するので、合図は作ったあとの dispatcher に渡す
+  let eventDispatcher: EventDispatcher | undefined;
+  // dispatcher を作る前に来た合図。作ったあとに 1 回ポーリングする
+  let wakeBeforeDispatcher = false;
+
   // Slackボットを起動
   if (config.slack.enabled) {
     await startSlackBot({
@@ -1206,13 +1214,23 @@ async function main() {
         return skills;
       },
       scheduler,
+      eventWake: eventConfig.wakeChannelId
+        ? {
+            channelId: eventConfig.wakeChannelId,
+            onWake: () => {
+              console.log('[events] Wake signal received');
+              if (eventDispatcher) eventDispatcher.wake();
+              else wakeBeforeDispatcher = true;
+            },
+          }
+        : undefined,
     });
     console.log('[xangi] Slack bot started');
+  } else if (eventConfig.wakeChannelId) {
+    console.warn('[xangi] EVENT_WAKE_CHANNEL_ID is set but Slack is not enabled. Ignored.');
   }
 
   // イベント源（GitHub issue など）。claude と tmux が見つからなければ使えない
-  const watchListPath = getWatchListPath();
-  const eventConfig = loadEventConfig(process.env, existsSync(watchListPath));
   // 通知はウォッチリストの項目ごとの通知先を優先し、なければ EVENT_NOTIFY_CHANNEL_ID に送る
   const notifyEvent = async (message: string, channelId = eventConfig.notifyChannelId) => {
     console.log(`[events] ${message.split('\n')[0]}`);
@@ -1261,7 +1279,6 @@ async function main() {
   scheduler.startAll(config.scheduler);
 
   // イベント源のポーリングを開始
-  let eventDispatcher: EventDispatcher | undefined;
   if (eventLauncher) {
     const launcher = eventLauncher;
     // ポーリングのたびに決める。ウォッチリストがあればそれを使い、なければ EVENT_GITHUB_REPOS を使う
@@ -1310,7 +1327,14 @@ async function main() {
           ? `[xangi] Event polling started: ${watchListPath}`
           : `[xangi] Event polling started: ${eventConfig.githubRepos.join(', ')} (label: ${eventConfig.githubLabel})`
       );
+      if (wakeBeforeDispatcher) eventDispatcher.wake();
     }
+  }
+  if (config.slack.enabled && eventConfig.wakeChannelId && !eventDispatcher) {
+    // 合図のチャンネルの投稿は AI に渡さずに捨てるので、ポーリングしないことを起動時に知らせる
+    console.warn(
+      '[xangi] EVENT_WAKE_CHANNEL_ID is set but event polling is disabled. Wake signals are ignored.'
+    );
   }
 
   // シャットダウン時にスケジューラを停止
