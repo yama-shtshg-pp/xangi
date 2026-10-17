@@ -382,7 +382,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
     if (creator) {
       // スレッドの中なら親メッセージ（エラー通知など）を issue にする
       const sourceTs = event.thread_ts ?? event.ts;
-      let reply: string;
+      let reply: string | undefined;
       try {
         reply = await creator.handleMention({
           text: event.text || '',
@@ -416,8 +416,11 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
         console.error('[slack] Failed to create issue from mention:', err);
         reply = `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`;
       }
-      await say({ text: reply, thread_ts: sourceTs });
-      return;
+      if (reply !== undefined) {
+        await say({ text: reply, thread_ts: sourceTs });
+        return;
+      }
+      // key の指定でなければ、これまでどおり会話として扱う
     }
 
     let text = (event.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
@@ -526,10 +529,15 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       return;
     }
 
-    // メンションから issue を立てるインスタンスでは、スレッドの返信を会話として扱わない
-    // （エラー通知のスレッドでのメンションは app_mention で受ける。会話にすると二重に動く）
-    if (!isDM && isThreadReply && options.mentionIssue?.()) {
-      console.log('[slack] Skipping thread reply (mention issue mode)');
+    // メンションから issue を立てるインスタンスでは、スレッドの中のメンションは app_mention で受ける
+    // （会話としても処理すると、エラー通知のスレッドで二重に動く）
+    if (
+      !isDM &&
+      isThreadReply &&
+      options.mentionIssue?.() &&
+      /<@[A-Z0-9]+>/i.test(messageEvent.text || '')
+    ) {
+      console.log('[slack] Skipping mention in thread (handled by app_mention)');
       return;
     }
 

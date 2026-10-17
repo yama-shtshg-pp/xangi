@@ -161,7 +161,9 @@ export function parseWatchRepos(text: string): WatchRepoEntry[] {
     }
     if (typeof entry.key === 'string') {
       const key = normalizeKey(entry.key);
-      if (/\s/.test(key)) throw new Error(`${where}.key must not contain spaces`);
+      if (!KEY_PATTERN.test(key)) {
+        throw new Error(`${where}.key must be up to 16 letters, digits, "-" or "_"`);
+      }
       // 重複していると、メンションでどちらのリポジトリを選んだのかが定まらない
       const first = keys.get(key);
       if (first !== undefined) {
@@ -172,6 +174,12 @@ export function parseWatchRepos(text: string): WatchRepoEntry[] {
     return entry as unknown as WatchRepoEntry;
   });
 }
+
+/**
+ * key に使える文字
+ * メンションの最初の語がこの形でなければ、key の指定ではなく会話とみなす
+ */
+export const KEY_PATTERN = /^[A-Za-z0-9_-]{1,16}$/;
 
 /** key の比べ方（前後の空白と大文字・小文字を区別しない） */
 export function normalizeKey(key: string): string {

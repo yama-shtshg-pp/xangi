@@ -37,7 +37,7 @@ export type RepoTargetProvider = () => Promise<RepoTarget[]>;
 
 const execFileAsync = promisify(execFile);
 
-const defaultGhExec: GhExec = async (args) => {
+export const defaultGhExec: GhExec = async (args) => {
   const { stdout } = await execFileAsync('gh', args, {
     timeout: 30_000,
     maxBuffer: 10 * 1024 * 1024,

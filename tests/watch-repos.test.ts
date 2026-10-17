@@ -69,7 +69,8 @@ describe('parseWatchRepos', () => {
     ['{"repos":[{"path":"/a","enabled":"no"}]}', 'repos[0].enabled must be true or false'],
     ['{"repos":[{"path":"/a","repo":"repo-only"}]}', 'repos[0].repo must be owner/repo'],
     ['{"repos":[{"path":"/a","key":1}]}', 'repos[0].key must be a non-empty string'],
-    ['{"repos":[{"path":"/a","key":"a b"}]}', 'repos[0].key must not contain spaces'],
+    ['{"repos":[{"path":"/a","key":"a b"}]}', 'repos[0].key must be up to 16 letters'],
+    ['{"repos":[{"path":"/a","key":"日本"}]}', 'repos[0].key must be up to 16 letters'],
     [
       '{"repos":[{"path":"/a","key":"Jra"},{"path":"/b","key":" jra "}]}',
       'repos[1].key "jra" is already used by repos[0]',
