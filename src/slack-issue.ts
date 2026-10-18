@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import { defaultGhExec, type GhExec, type RepoTarget } from './event-source-github.js';
+import type { SummarizeTitle } from './title-summarizer.js';
 import { KEY_PATTERN, normalizeKey } from './watch-repos.js';
 
 /** メンションの本文から、メンションを除いた key と残りの本文を取り出す */
@@ -78,18 +79,25 @@ const TITLE_LIMIT = 80;
 /** gh に引数で渡すので、大きすぎる本文は切り詰める */
 const BODY_LIMIT = 20_000;
 
+/** 要約に渡すテキスト（補足があれば本文の前に置く） */
+export function summaryInput(text: string, note = ''): string {
+  return [unSlack(note).trim(), unSlack(text).trim()].filter(Boolean).join('\n\n');
+}
+
 /**
  * @param text issue にするメッセージの本文
  * @param note メンションに書かれた補足（スレッドの中で key のあとに書いたもの）
+ * @param summary 本文を要約したタイトル。なければ本文の 1 行目を使う
  */
 export function buildIssue(
   text: string,
   permalink?: string,
-  note = ''
+  note = '',
+  summary?: string
 ): { title: string; body: string } {
   const plain = unSlack(text).trim() || unSlack(note).trim();
   const firstLine = plain.split('\n').find((line) => line.trim() !== '') ?? '';
-  let title = firstLine.trim().replace(/\s+/g, ' ');
+  let title = summary?.trim() || firstLine.trim().replace(/\s+/g, ' ');
   if (title.length > TITLE_LIMIT) title = `${title.slice(0, TITLE_LIMIT - 1)}…`;
   title = `[Slack] ${title || 'Slack のメッセージから作成'}`;
 
@@ -174,6 +182,8 @@ export interface SlackIssueCreatorOptions {
   store: SlackIssueStore;
   /** issue を立てたあとに呼ぶ（すぐに確認を走らせる） */
   onCreated: () => void;
+  /** 本文からタイトルを要約する。未指定・失敗なら本文の 1 行目を使う */
+  summarizeTitle?: SummarizeTitle;
   gh?: GhExec;
 }
 
@@ -230,7 +240,8 @@ export class SlackIssueCreator {
 
       const text = input.inThread ? await input.loadParentText() : rest;
       const note = input.inThread ? rest : '';
-      const { title, body } = buildIssue(text, await input.getPermalink(), note);
+      const summary = await this.summarize(summaryInput(text, note));
+      const { title, body } = buildIssue(text, await input.getPermalink(), note, summary);
       let url: string;
       try {
         const stdout = await this.gh([
@@ -260,6 +271,19 @@ export class SlackIssueCreator {
       return `📝 ${target.repo} に issue を立てました。まもなく Claude Code が起動します\n${url}`;
     } finally {
       this.pending.delete(pendingKey);
+    }
+  }
+
+  private async summarize(text: string): Promise<string | undefined> {
+    if (!this.options.summarizeTitle || !text) return undefined;
+    try {
+      return await this.options.summarizeTitle(text);
+    } catch (err) {
+      // 要約できなくても issue は立てる（タイトルは本文の 1 行目にする）
+      console.error(
+        `[slack-issue] Failed to summarize title: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return undefined;
     }
   }
 }

@@ -4,14 +4,16 @@
  * イベント（GitHub issue）ごとに `cc-<リポジトリ名>-issue<番号>` という tmux セッションを作り、
  * `claude -n <名前> --remote-control <名前> <プロンプト>` を動かす。
  * 起動したあとのやり取りは、人が `tmux attach` か Remote Control から Claude Code と直接行う。
- * xangi はセッションの有無だけを見て、起動中か終了かを判断する。
+ * xangi はセッションの有無で起動中か終了かを判断する。
+ * stateDir を渡すと、Claude Code のフックで作業中（busy）か入力待ち（idle）かを
+ * `<stateDir>/<セッション名>` に書かせ、同時起動数の数え方と自動で閉じる判断に使う。
  *
  * Why: issue の本文には引用符や `$()` が入りうる。シェルを通すと本文の一部がコマンドとして
  * 実行されるおそれがあるので、tmux には引数を配列で渡す（tmux は引数が 2 つ以上なら
  * シェルを通さずに実行する）。`claude` もエイリアスを通さないよう、絶対パスで起動する。
  */
 import { execFile } from 'child_process';
-import { accessSync, constants } from 'fs';
+import { accessSync, constants, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { delimiter, join, resolve } from 'path';
 import { promisify } from 'util';
 import type { AgentEvent } from './event-store.js';
@@ -36,6 +38,38 @@ const NO_SESSION_PATTERNS = [
 ];
 
 const execFileAsync: ExecFileFn = promisify(execFile);
+
+/** Claude Code が作業中か入力待ちか。フックの記録がなければ unknown */
+export type SessionActivity = 'busy' | 'idle' | 'unknown';
+
+/** シェルの単一引用符で囲む（フックのコマンドはシェルで実行される） */
+function shellQuote(text: string): string {
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * 作業中か入力待ちかをファイルに書くフックの設定（`claude --settings` に渡す JSON）
+ * 返答を終えたとき（Stop）と、許可や入力を待つ通知（Notification）で idle にする。
+ * 人が続きを指示したとき（UserPromptSubmit）と、ツールの前後で busy に戻す
+ * （許可を待ったあとに作業を再開したときは、UserPromptSubmit が来ないため）
+ */
+export function buildActivityHookSettings(statePath: string): string {
+  const write = (state: 'busy' | 'idle') => [
+    { hooks: [{ type: 'command', command: `printf ${state} > ${shellQuote(statePath)}` }] },
+  ];
+  const settings = {
+    hooks: {
+      UserPromptSubmit: write('busy'),
+      PreToolUse: write('busy'),
+      PostToolUse: write('busy'),
+      Stop: write('idle'),
+      Notification: [
+        { matcher: 'permission_prompt|idle_prompt|elicitation_dialog', ...write('idle')[0] },
+      ],
+    },
+  };
+  return JSON.stringify(settings);
+}
 
 /** tmux のセッション名に使えない文字（`.` と `:` など）を `-` に置き換える */
 function sanitize(text: string): string {
@@ -91,6 +125,8 @@ export interface TmuxLauncherOptions {
   sessionPath?: string;
   /** 起動してから、すぐに終了していないかを確かめるまでの時間 */
   startupCheckMs?: number;
+  /** 作業中か入力待ちかを書かせるディレクトリ。未指定ならフックを付けない */
+  stateDir?: string;
   exec?: ExecFileFn;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -129,6 +165,31 @@ export class TmuxLauncher {
     }
   }
 
+  private statePath(name: string): string | undefined {
+    return this.options.stateDir ? join(this.options.stateDir, name) : undefined;
+  }
+
+  /** フックが書いた状態を返す。フックを付けずに起動したセッションなら unknown */
+  getActivity(name: string): SessionActivity {
+    const path = this.statePath(name);
+    if (!path) return 'unknown';
+    try {
+      const state = readFileSync(path, 'utf-8').trim();
+      return state === 'busy' || state === 'idle' ? state : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /** tmux のセッションを閉じる。すでになければ何もしない */
+  async kill(name: string): Promise<void> {
+    if (await this.hasSession(name)) {
+      await this.run(['kill-session', '-t', `=${name}`]);
+    }
+    const path = this.statePath(name);
+    if (path) rmSync(path, { force: true });
+  }
+
   /**
    * tmux の新しいセッションで Claude Code を起動する
    * @param cwd 作業ディレクトリ。未指定なら options.cwd
@@ -137,6 +198,15 @@ export class TmuxLauncher {
    */
   async launch(name: string, prompt: string, cwd: string = this.options.cwd): Promise<boolean> {
     if (await this.hasSession(name)) return false;
+    const statePath = this.statePath(name);
+    const hookArgs: string[] = [];
+    if (statePath) {
+      mkdirSync(this.options.stateDir!, { recursive: true });
+      // 最初のプロンプトを処理している間を作業中にする。前に同じ名前で起動したときの状態も上書きする
+      // （unknown はフックのない旧セッションだけになる）
+      writeFileSync(statePath, 'busy');
+      hookArgs.push('--settings', buildActivityHookSettings(statePath));
+    }
     await this.run([
       'new-session',
       '-d',
@@ -150,6 +220,7 @@ export class TmuxLauncher {
       name,
       '--remote-control',
       name,
+      ...hookArgs,
       prompt,
     ]);
     // new-session はセッションを作った時点で成功する。すぐに終わったものを「人が閉じた」と取り違えない
