@@ -13,7 +13,7 @@
  * シェルを通さずに実行する）。`claude` もエイリアスを通さないよう、絶対パスで起動する。
  */
 import { execFile } from 'child_process';
-import { accessSync, constants, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { accessSync, constants, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { delimiter, join, resolve } from 'path';
 import { promisify } from 'util';
 import type { AgentEvent } from './event-store.js';
@@ -179,15 +179,6 @@ export class TmuxLauncher {
     } catch {
       return 'unknown';
     }
-  }
-
-  /** tmux のセッションを閉じる。すでになければ何もしない */
-  async kill(name: string): Promise<void> {
-    if (await this.hasSession(name)) {
-      await this.run(['kill-session', '-t', `=${name}`]);
-    }
-    const path = this.statePath(name);
-    if (path) rmSync(path, { force: true });
   }
 
   /**

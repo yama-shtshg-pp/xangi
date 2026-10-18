@@ -1327,7 +1327,6 @@ async function main() {
         },
         isAlive: (sessionName) => launcher.hasSession(sessionName),
         getActivity: (sessionName) => launcher.getActivity(sessionName),
-        close: (sessionName) => launcher.kill(sessionName),
       });
       // 初回のポーリング（gh の呼び出し）で起動処理を待たせない
       eventDispatcher.start(eventConfig.pollIntervalMs).catch((err) => {
