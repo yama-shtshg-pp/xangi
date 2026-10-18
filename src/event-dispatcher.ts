@@ -33,8 +33,26 @@ export interface EventConfig {
   notifyChannelId?: string;
   /** 起動する claude のパス（未指定なら PATH から探す） */
   claudePath?: string;
+  /** 起動する claude に --dangerously-skip-permissions を付けるか */
+  claudeSkipPermissions: boolean;
   /** 投稿があったらすぐポーリングする Slack チャンネル（合図のチャンネル） */
   wakeChannelId?: string;
+}
+
+/**
+ * 既定は付ける。issue から起動したセッションは人が見ていないことが多く、許可の確認で止まると進まない。
+ * 付けない値を書き間違えて黙って付くことがないよう、知らない値は警告する
+ */
+function parseSkipPermissions(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase();
+  if (!v) return true;
+  if (['false', '0', 'no', 'off'].includes(v)) return false;
+  if (!['true', '1', 'yes', 'on'].includes(v)) {
+    console.warn(
+      `[event-dispatcher] Unknown EVENT_CLAUDE_SKIP_PERMISSIONS "${value}". Skipping permissions (set false to keep prompts)`
+    );
+  }
+  return true;
 }
 
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
@@ -72,6 +90,7 @@ export function loadEventConfig(
     maxConcurrent: Math.floor(parsePositiveNumber(env.EVENT_MAX_CONCURRENT, 5)),
     notifyChannelId: env.EVENT_NOTIFY_CHANNEL_ID?.trim() || undefined,
     claudePath: env.EVENT_CLAUDE_PATH?.trim() || undefined,
+    claudeSkipPermissions: parseSkipPermissions(env.EVENT_CLAUDE_SKIP_PERMISSIONS),
     wakeChannelId: env.EVENT_WAKE_CHANNEL_ID?.trim() || undefined,
   };
 }

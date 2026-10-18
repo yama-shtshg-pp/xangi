@@ -380,6 +380,7 @@ describe('loadEventConfig', () => {
       maxConcurrent: 5,
       notifyChannelId: undefined,
       claudePath: undefined,
+      claudeSkipPermissions: true,
       wakeChannelId: undefined,
     });
   });
@@ -395,6 +396,7 @@ describe('loadEventConfig', () => {
         EVENT_MAX_CONCURRENT: '2',
         EVENT_NOTIFY_CHANNEL_ID: '123',
         EVENT_CLAUDE_PATH: '/opt/bin/claude',
+        EVENT_CLAUDE_SKIP_PERMISSIONS: 'false',
         EVENT_WAKE_CHANNEL_ID: ' C123 ',
       })
     ).toEqual({
@@ -406,8 +408,31 @@ describe('loadEventConfig', () => {
       maxConcurrent: 2,
       notifyChannelId: '123',
       claudePath: '/opt/bin/claude',
+      claudeSkipPermissions: false,
       wakeChannelId: 'C123',
     });
+  });
+
+  it('EVENT_CLAUDE_SKIP_PERMISSIONS は false / 0 / no / off を大文字小文字に関係なく付けないと読む', () => {
+    for (const v of ['false', 'FALSE', ' 0 ', 'No', 'off']) {
+      expect(loadEventConfig({ EVENT_CLAUDE_SKIP_PERMISSIONS: v }).claudeSkipPermissions).toBe(
+        false
+      );
+    }
+    for (const v of ['', 'true', '1', 'YES', 'on']) {
+      expect(loadEventConfig({ EVENT_CLAUDE_SKIP_PERMISSIONS: v }).claudeSkipPermissions).toBe(
+        true
+      );
+    }
+  });
+
+  it('EVENT_CLAUDE_SKIP_PERMISSIONS が知らない値なら警告して付ける', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(loadEventConfig({ EVENT_CLAUDE_SKIP_PERMISSIONS: 'nope' }).claudeSkipPermissions).toBe(
+      true
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('EVENT_CLAUDE_SKIP_PERMISSIONS'));
+    warn.mockRestore();
   });
 
   it('リポジトリが空なら有効にしない', () => {

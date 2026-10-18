@@ -1267,12 +1267,15 @@ async function main() {
       eventLauncher = new TmuxLauncher({
         tmuxPath,
         claudePath,
+        skipPermissions: eventConfig.claudeSkipPermissions,
         cwd: workdir,
         sessionPath: { ...safeEnv, ...getGitHubEnv(safeEnv) }.PATH,
         // フックは Claude Code の作業ディレクトリで動くので、DATA_DIR が相対パスでも絶対パスで渡す
         stateDir: resolve(dataDir, 'event-sessions'),
       });
-      console.log(`[xangi] Events launch ${claudePath} in tmux (cwd: ${workdir})`);
+      console.log(
+        `[xangi] Events launch ${claudePath} in tmux (cwd: ${workdir}, skip permissions: ${eventConfig.claudeSkipPermissions})`
+      );
     }
   }
 
