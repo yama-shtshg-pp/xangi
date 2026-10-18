@@ -180,6 +180,21 @@ describe('TmuxLauncher', () => {
     ]);
   });
 
+  it('skipPermissions が false なら --dangerously-skip-permissions を付けない', async () => {
+    const exec = vi.fn().mockRejectedValueOnce(noSession()).mockResolvedValue(ok);
+    const launcher = new TmuxLauncher({
+      tmuxPath: '/opt/homebrew/bin/tmux',
+      claudePath: '/Users/me/.local/bin/claude',
+      skipPermissions: false,
+      cwd: '/workspace',
+      exec,
+      sleep: async () => {},
+    });
+
+    expect(await launcher.launch('cc-a-issue1', 'p')).toBe(true);
+    expect(exec.mock.calls[1][1]).not.toContain('--dangerously-skip-permissions');
+  });
+
   it('claude が起動してすぐに終了したら例外を投げる', async () => {
     const exec = vi
       .fn()
