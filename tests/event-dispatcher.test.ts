@@ -380,6 +380,7 @@ describe('loadEventConfig', () => {
       maxConcurrent: 5,
       notifyChannelId: undefined,
       claudePath: undefined,
+      claudeSkipPermissions: true,
       wakeChannelId: undefined,
     });
   });
@@ -395,6 +396,7 @@ describe('loadEventConfig', () => {
         EVENT_MAX_CONCURRENT: '2',
         EVENT_NOTIFY_CHANNEL_ID: '123',
         EVENT_CLAUDE_PATH: '/opt/bin/claude',
+        EVENT_CLAUDE_SKIP_PERMISSIONS: 'false',
         EVENT_WAKE_CHANNEL_ID: ' C123 ',
       })
     ).toEqual({
@@ -406,6 +408,7 @@ describe('loadEventConfig', () => {
       maxConcurrent: 2,
       notifyChannelId: '123',
       claudePath: '/opt/bin/claude',
+      claudeSkipPermissions: false,
       wakeChannelId: 'C123',
     });
   });

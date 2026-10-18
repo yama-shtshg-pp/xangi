@@ -293,14 +293,19 @@ EVENTS_ENABLED=true
 # DISCORD_TOKEN / SLACK_* / WEB_CHAT_ENABLED は設定しない
 # claude が PATH にないときだけ指定する
 # EVENT_CLAUDE_PATH=/Users/you/.local/bin/claude
+# 許可の確認を出したいときだけ指定する（既定は --dangerously-skip-permissions を付ける）
+# EVENT_CLAUDE_SKIP_PERMISSIONS=false
 ```
 
 - Discord が無効なときは、承認サーバーを起動しません。ほかのインスタンスとポートを取り合いません
-  - ワークスペースの Claude Code の設定に、承認サーバーへの PreToolUse フックを入れないでください。許可の確認は Claude Code 本体が出します
+  - ワークスペースの Claude Code の設定に、承認サーバーへの PreToolUse フックを入れないでください。許可の確認を出すときは Claude Code 本体が出します
 - `claude` か `tmux` が見つからないときは、イベントからの起動を止めます
   - チャットも無効なら、xangi はエラーで終了します
-- `claude` はエイリアスを通さず、絶対パスで起動します
-  - シェルのエイリアスに `--dangerously-skip-permissions` を入れていても、許可の確認はいつもどおり出ます
+- `claude` はエイリアスやシェル関数を通さず、絶対パスで起動します
+- 起動する `claude` には、既定で `--dangerously-skip-permissions` を付けます
+  - issue から起動したセッションは人が見ていないことが多く、許可の確認で止まると作業が進まないためです
+  - 許可の確認なしでコマンドを実行します。止めたい操作は、ワークスペースの Claude Code の設定に deny のフックや `permissions.deny` で入れてください
+  - 許可の確認を出したいときは `EVENT_CLAUDE_SKIP_PERMISSIONS=false` にします
 
 ### Slack の通知を合図にすぐ確認する
 
@@ -992,6 +997,7 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `EVENT_MAX_CONCURRENT` | 同時に作業させる数の上限（入力待ちのセッションは数えない） | `5` |
 | `EVENT_NOTIFY_CHANNEL_ID` | 起動・終了・失敗を通知する Discord チャンネル（ウォッチリストの `notifyChannelId` の既定値） | - |
 | `EVENT_CLAUDE_PATH` | イベントから起動する `claude` のパス | PATH から探す |
+| `EVENT_CLAUDE_SKIP_PERMISSIONS` | `false` にすると、イベントから起動する `claude` に `--dangerously-skip-permissions` を付けない | 付ける |
 | `EVENT_WAKE_CHANNEL_ID` | 投稿を合図に、ウォッチリストの issue をすぐ確認する Slack チャンネル | - |
 
 ### GitHub App認証（オプション）

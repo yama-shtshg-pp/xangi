@@ -155,6 +155,31 @@ describe('TmuxLauncher', () => {
     );
   });
 
+  it('skipPermissions があれば --dangerously-skip-permissions を付けて起動する', async () => {
+    const exec = vi.fn().mockRejectedValueOnce(noSession()).mockResolvedValue(ok);
+    const launcher = new TmuxLauncher({
+      tmuxPath: '/opt/homebrew/bin/tmux',
+      claudePath: '/Users/me/.local/bin/claude',
+      skipPermissions: true,
+      cwd: '/workspace',
+      exec,
+      sleep: async () => {},
+    });
+
+    expect(await launcher.launch('cc-a-issue1', 'p')).toBe(true);
+    const args = exec.mock.calls[1][1] as string[];
+    expect(args.slice(args.indexOf('--'))).toEqual([
+      '--',
+      '/Users/me/.local/bin/claude',
+      '--dangerously-skip-permissions',
+      '-n',
+      'cc-a-issue1',
+      '--remote-control',
+      'cc-a-issue1',
+      'p',
+    ]);
+  });
+
   it('claude が起動してすぐに終了したら例外を投げる', async () => {
     const exec = vi
       .fn()

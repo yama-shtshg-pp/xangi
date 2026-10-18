@@ -33,6 +33,8 @@ export interface EventConfig {
   notifyChannelId?: string;
   /** 起動する claude のパス（未指定なら PATH から探す） */
   claudePath?: string;
+  /** 起動する claude に --dangerously-skip-permissions を付けるか */
+  claudeSkipPermissions: boolean;
   /** 投稿があったらすぐポーリングする Slack チャンネル（合図のチャンネル） */
   wakeChannelId?: string;
 }
@@ -72,6 +74,8 @@ export function loadEventConfig(
     maxConcurrent: Math.floor(parsePositiveNumber(env.EVENT_MAX_CONCURRENT, 5)),
     notifyChannelId: env.EVENT_NOTIFY_CHANNEL_ID?.trim() || undefined,
     claudePath: env.EVENT_CLAUDE_PATH?.trim() || undefined,
+    // 既定は付ける。issue から起動したセッションは人が見ていないことが多く、許可の確認で止まると進まない
+    claudeSkipPermissions: env.EVENT_CLAUDE_SKIP_PERMISSIONS?.trim() !== 'false',
     wakeChannelId: env.EVENT_WAKE_CHANNEL_ID?.trim() || undefined,
   };
 }

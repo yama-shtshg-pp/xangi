@@ -119,6 +119,8 @@ export function resolveCommandPath(
 export interface TmuxLauncherOptions {
   tmuxPath: string;
   claudePath: string;
+  /** --dangerously-skip-permissions を付けるか */
+  skipPermissions?: boolean;
   /** Claude Code の作業ディレクトリ（launch で指定がないとき） */
   cwd: string;
   /** セッションの PATH（GitHub App のラッパーを含める）。未指定なら getSafeEnv() の PATH */
@@ -207,6 +209,7 @@ export class TmuxLauncher {
       cwd,
       '--',
       this.options.claudePath,
+      ...(this.options.skipPermissions ? ['--dangerously-skip-permissions'] : []),
       '-n',
       name,
       '--remote-control',
