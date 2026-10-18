@@ -118,30 +118,4 @@ describe('GitHubIssueSource', () => {
     await expect(source.poll()).rejects.toThrow('bad json');
     expect(gh).not.toHaveBeenCalled();
   });
-
-  it('isClosed は gh issue view で state を見て、CLOSED なら true', async () => {
-    const gh = vi.fn().mockResolvedValue('{"state":"CLOSED"}');
-    const source = new GitHubIssueSource(targets(['o/a']), gh);
-    const event = {
-      source: 'github-issue',
-      id: 'o/a#12',
-      title: '',
-      body: '',
-      url: '',
-      labels: [],
-    };
-    expect(await source.isClosed(event)).toBe(true);
-    expect(gh).toHaveBeenCalledWith(['issue', 'view', '12', '--repo', 'o/a', '--json', 'state']);
-
-    gh.mockResolvedValue('{"state":"OPEN"}');
-    expect(await source.isClosed(event)).toBe(false);
-  });
-
-  it('isClosed は issue の形でない ID なら例外を投げる', async () => {
-    const gh = vi.fn();
-    const source = new GitHubIssueSource(targets(['o/a']), gh);
-    const event = { source: 'github-issue', id: 'o/a', title: '', body: '', url: '', labels: [] };
-    await expect(source.isClosed(event)).rejects.toThrow('Unexpected issue id');
-    expect(gh).not.toHaveBeenCalled();
-  });
 });

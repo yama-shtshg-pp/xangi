@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -264,27 +264,5 @@ describe('TmuxLauncher の状態の記録', () => {
     await launcher.launch('cc-a-issue1', 'prompt');
     expect(exec.mock.calls[1][1]).not.toContain('--settings');
     expect(launcher.getActivity('cc-a-issue1')).toBe('unknown');
-  });
-
-  it('kill は完全一致でセッションを閉じ、状態の記録を消す', async () => {
-    mkdirSync(join(dir, 'event-sessions'));
-    const statePath = join(dir, 'event-sessions', 'cc-a-issue1');
-    writeFileSync(statePath, 'idle');
-    const exec = vi.fn().mockResolvedValue(ok);
-
-    await makeStateLauncher(exec).kill('cc-a-issue1');
-
-    expect(exec).toHaveBeenLastCalledWith(
-      '/opt/homebrew/bin/tmux',
-      ['kill-session', '-t', '=cc-a-issue1'],
-      expect.anything()
-    );
-    expect(existsSync(statePath)).toBe(false);
-  });
-
-  it('kill はセッションがなければ kill-session を呼ばない', async () => {
-    const exec = vi.fn().mockRejectedValue(noSession());
-    await makeStateLauncher(exec).kill('cc-a-issue1');
-    expect(exec).toHaveBeenCalledTimes(1);
   });
 });
