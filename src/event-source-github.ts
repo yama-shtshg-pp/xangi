@@ -14,6 +14,8 @@ import type { AgentEvent } from './event-store.js';
 export interface EventSource {
   name: string;
   poll(): Promise<AgentEvent[]>;
+  /** イベントの対象が片付いたか（issue なら close されたか）。未実装なら自動では閉じない */
+  isClosed?(event: AgentEvent): Promise<boolean>;
 }
 
 /** gh を実行して標準出力を返す（テストで差し替える） */
@@ -83,6 +85,26 @@ export class GitHubIssueSource implements EventSource {
       }
     }
     return events;
+  }
+
+  /**
+   * issue が close されたか
+   * @throws ID の形が違うとき・gh が失敗したとき（呼び出し側は起動中のままにする）
+   */
+  async isClosed(event: AgentEvent): Promise<boolean> {
+    const match = /^([^/#\s]+\/[^/#\s]+)#(\d+)$/.exec(event.id);
+    if (!match) throw new Error(`Unexpected issue id: ${event.id}`);
+    const stdout = await this.gh([
+      'issue',
+      'view',
+      match[2],
+      '--repo',
+      match[1],
+      '--json',
+      'state',
+    ]);
+    const { state } = JSON.parse(stdout) as { state?: string };
+    return state === 'CLOSED';
   }
 
   private async pollRepo(target: RepoTarget): Promise<AgentEvent[]> {

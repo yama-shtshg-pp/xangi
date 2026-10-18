@@ -51,7 +51,7 @@ import {
   getActiveSessionId,
 } from './sessions.js';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { config as dotenvConfig } from 'dotenv';
 import { startWebChat } from './web-chat.js';
 import { EventStore } from './event-store.js';
@@ -59,6 +59,7 @@ import { GitHubIssueSource, type RepoTarget } from './event-source-github.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { SlackIssueCreator, SlackIssueStore } from './slack-issue.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
+import { createClaudeTitleSummarizer } from './title-summarizer.js';
 import { WATCH_REPOS_FILE, WatchRepoList, getWatchListPath } from './watch-repos.js';
 import { getSafeEnv } from './safe-env.js';
 dotenvConfig({ override: true });
@@ -1250,6 +1251,7 @@ async function main() {
     notify: notifyEvent,
   });
   let eventLauncher: TmuxLauncher | undefined;
+  let eventClaudePath: string | undefined;
   if (eventConfig.enabled) {
     const claudePath = resolveCommandPath(eventConfig.claudePath ?? 'claude');
     const tmuxPath = resolveCommandPath('tmux');
@@ -1261,11 +1263,14 @@ async function main() {
       console.error('[xangi] Event polling disabled: tmux not found in PATH');
     } else {
       const safeEnv = getSafeEnv();
+      eventClaudePath = claudePath;
       eventLauncher = new TmuxLauncher({
         tmuxPath,
         claudePath,
         cwd: workdir,
         sessionPath: { ...safeEnv, ...getGitHubEnv(safeEnv) }.PATH,
+        // フックは Claude Code の作業ディレクトリで動くので、DATA_DIR が相対パスでも絶対パスで渡す
+        stateDir: resolve(dataDir, 'event-sessions'),
       });
       console.log(`[xangi] Events launch ${claudePath} in tmux (cwd: ${workdir})`);
     }
@@ -1321,6 +1326,8 @@ async function main() {
           return { sessionName, launched };
         },
         isAlive: (sessionName) => launcher.hasSession(sessionName),
+        getActivity: (sessionName) => launcher.getActivity(sessionName),
+        close: (sessionName) => launcher.kill(sessionName),
       });
       // 初回のポーリング（gh の呼び出し）で起動処理を待たせない
       eventDispatcher.start(eventConfig.pollIntervalMs).catch((err) => {
@@ -1344,6 +1351,9 @@ async function main() {
               return watchList.load();
             },
             onCreated: () => dispatcher.wake(),
+            ...(eventClaudePath
+              ? { summarizeTitle: createClaudeTitleSummarizer(eventClaudePath) }
+              : {}),
           });
           console.log('[xangi] Slack mentions create GitHub issues');
         } catch (err) {

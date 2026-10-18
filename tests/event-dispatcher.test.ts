@@ -11,6 +11,7 @@ import {
 } from '../src/event-dispatcher.js';
 import { EventStore, type AgentEvent } from '../src/event-store.js';
 import type { EventSource } from '../src/event-source-github.js';
+import type { SessionActivity } from '../src/tmux-launcher.js';
 
 function makeEvent(n: number): AgentEvent {
   return {
@@ -69,6 +70,143 @@ describe('EventDispatcher', () => {
   }
 
   const messages = () => notify.mock.calls.map((c) => c[0] as string);
+
+  describe('入力待ちと issue の close', () => {
+    let activity: Map<string, SessionActivity>;
+    let closed: Set<string>;
+    let close: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      activity = new Map();
+      closed = new Set();
+      // close を確かめるイベント源は、イベントの source の名前で選ぶ
+      source.name = 'github-issue';
+      source.isClosed = vi.fn(async (event: AgentEvent) => closed.has(event.id));
+      close = vi.fn(async (name: string) => {
+        alive.delete(name);
+      });
+    });
+
+    function makeLifecycleDispatcher(overrides: Partial<EventDispatcherOptions> = {}) {
+      return makeDispatcher({
+        getActivity: (name) => activity.get(name) ?? 'unknown',
+        close,
+        ...overrides,
+      });
+    }
+
+    it('入力待ちのセッションは同時起動数に数えず、次を起動する', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher();
+      await dispatcher.poll();
+      activity.set('cc-a-issue1', 'idle');
+      events = [makeEvent(1), makeEvent(2)];
+      await dispatcher.poll();
+
+      expect(launch).toHaveBeenCalledTimes(2);
+      expect(store.countByStatus('running')).toBe(2);
+    });
+
+    it('作業中と、記録のない（unknown）セッションは同時起動数に数える', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher({ maxConcurrent: 2 });
+      await dispatcher.poll();
+      events = [makeEvent(1), makeEvent(2)];
+      await dispatcher.poll();
+      activity.set('cc-a-issue1', 'busy');
+      events = [makeEvent(1), makeEvent(2), makeEvent(3)];
+      await dispatcher.poll();
+
+      expect(launch).toHaveBeenCalledTimes(2);
+      expect(store.countByStatus('queued')).toBe(1);
+    });
+
+    it('issue が close されて入力待ちなら、セッションを閉じて終了にし、通知する', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher();
+      await dispatcher.poll();
+      activity.set('cc-a-issue1', 'idle');
+      closed.add('o/a#1');
+      events = [];
+      await dispatcher.poll();
+
+      expect(close).toHaveBeenCalledWith('cc-a-issue1');
+      expect(store.countByStatus('done')).toBe(1);
+      expect(messages().at(-1)).toContain('issue が close されたので cc-a-issue1 を閉じました');
+    });
+
+    it('issue が close されても、作業中なら閉じない', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher();
+      await dispatcher.poll();
+      activity.set('cc-a-issue1', 'busy');
+      closed.add('o/a#1');
+      await dispatcher.poll();
+
+      expect(close).not.toHaveBeenCalled();
+      expect(source.isClosed).not.toHaveBeenCalled();
+      expect(store.countByStatus('running')).toBe(1);
+    });
+
+    it('close を確かめている間に作業中に戻ったら閉じない', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher();
+      await dispatcher.poll();
+      activity.set('cc-a-issue1', 'idle');
+      source.isClosed = vi.fn(async () => {
+        activity.set('cc-a-issue1', 'busy');
+        return true;
+      });
+      await dispatcher.poll();
+
+      expect(close).not.toHaveBeenCalled();
+      expect(store.countByStatus('running')).toBe(1);
+    });
+
+    it('フックのない旧セッション（unknown）は、issue が close されたら閉じる', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher();
+      await dispatcher.poll();
+      closed.add('o/a#1');
+      await dispatcher.poll();
+
+      expect(close).toHaveBeenCalledWith('cc-a-issue1');
+    });
+
+    it('issue が open のままなら閉じない', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher();
+      await dispatcher.poll();
+      activity.set('cc-a-issue1', 'idle');
+      await dispatcher.poll();
+
+      expect(close).not.toHaveBeenCalled();
+      expect(store.countByStatus('running')).toBe(1);
+    });
+
+    it('close されたか確かめられないときは、起動中のままにする', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher();
+      await dispatcher.poll();
+      source.isClosed = vi.fn().mockRejectedValue(new Error('gh: network'));
+      await dispatcher.poll();
+
+      expect(close).not.toHaveBeenCalled();
+      expect(store.countByStatus('running')).toBe(1);
+    });
+
+    it('close が未指定なら、issue が close されても閉じない', async () => {
+      events = [makeEvent(1)];
+      const dispatcher = makeLifecycleDispatcher({ close: undefined });
+      await dispatcher.poll();
+      closed.add('o/a#1');
+      await dispatcher.poll();
+
+      expect(source.isClosed).not.toHaveBeenCalled();
+      expect(store.countByStatus('running')).toBe(1);
+    });
+  });
 
   it('新しいイベントで起動し、セッション名を残して起動中にする', async () => {
     events = [makeEvent(1)];
@@ -323,7 +461,7 @@ describe('loadEventConfig', () => {
       githubLabel: 'agent',
       pollIntervalMs: 300_000,
       maxLoadPerCpu: 0.8,
-      maxConcurrent: 1,
+      maxConcurrent: 5,
       notifyChannelId: undefined,
       claudePath: undefined,
       wakeChannelId: undefined,
@@ -378,7 +516,7 @@ describe('loadEventConfig', () => {
   it('数値でない・0 以下の値は既定値にする', () => {
     const config = loadEventConfig({ EVENT_POLL_INTERVAL_SEC: 'abc', EVENT_MAX_CONCURRENT: '0' });
     expect(config.pollIntervalMs).toBe(300_000);
-    expect(config.maxConcurrent).toBe(1);
+    expect(config.maxConcurrent).toBe(5);
   });
 });
 

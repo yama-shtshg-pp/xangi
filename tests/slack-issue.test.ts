@@ -129,6 +129,39 @@ describe('SlackIssueCreator', () => {
     expect(reply).toContain('https://github.com/o/a/issues/5');
   });
 
+  it('summarizeTitle があれば、補足と本文から要約したタイトルを使う', async () => {
+    const summarizeTitle = vi.fn(async () => 'Cron の失敗');
+    const creator = new SlackIssueCreator({
+      listTargets: async () => targets,
+      store,
+      onCreated,
+      gh,
+      summarizeTitle,
+    });
+    await creator.handleMention(input({ text: '<@U0> 1 急ぎ' }));
+    expect(summarizeTitle).toHaveBeenCalledWith('急ぎ\n\nCron failed\nstack');
+    const args = gh.mock.calls[0][0] as string[];
+    expect(args[args.indexOf('--title') + 1]).toBe('[Slack] Cron の失敗');
+  });
+
+  it('要約に失敗したら、本文の 1 行目をタイトルにして issue を立てる', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const creator = new SlackIssueCreator({
+      listTargets: async () => targets,
+      store,
+      onCreated,
+      gh,
+      summarizeTitle: async () => {
+        throw new Error('claude: timeout');
+      },
+    });
+    await creator.handleMention(input());
+    const args = gh.mock.calls[0][0] as string[];
+    expect(args[args.indexOf('--title') + 1]).toBe('[Slack] Cron failed');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('claude: timeout'));
+    error.mockRestore();
+  });
+
   it('key は大文字・小文字を区別せず、項目のラベルを使う', async () => {
     await makeCreator().handleMention(input({ text: '<@U0> JRA' }));
     const args = gh.mock.calls[0][0] as string[];

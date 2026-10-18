@@ -3,17 +3,22 @@
  *
  * 流れ:
  * 1. 起動中のイベントの tmux セッションがまだあるかを確かめ、なくなっていたら終了にする
+ *    issue が close されていて Claude Code が入力待ちなら、セッションを閉じて終了にする
  * 2. 各イベント源を poll し、未記録のイベントをキューに積む
  * 3. 負荷がしきい値以下で、同時起動数に空きがあれば、古い順に起動する
+ *    入力待ちのセッションは同時起動数に数えない
  * 4. 起動・終了・失敗を通知する
  *
  * Why: すぐ起動するか後に回すかは、負荷の数値で決まるのでコードのルールで判断する。
  * 対応不要かどうかは issue を読まないと決められないので、起動した Claude Code に任せる。
- * 起動は対話モードなので、作業が終わったかは判定しない。人がセッションを閉じたら終了とみなす。
+ * 起動は対話モードなので、作業が終わったかは Claude Code からは分からない。
+ * issue が close されたら終わったとみなす。人がセッションを閉じたときも終了とみなす。
+ * 入力待ちのセッションは人の返事を待っているだけなので、後続の issue を待たせない。
  */
 import { cpus, loadavg } from 'os';
 import type { EventSource } from './event-source-github.js';
 import type { AgentEvent, EventRecord, EventStore } from './event-store.js';
+import type { SessionActivity } from './tmux-launcher.js';
 
 export interface EventConfig {
   enabled: boolean;
@@ -65,7 +70,7 @@ export function loadEventConfig(
     githubLabel: env.EVENT_GITHUB_LABEL?.trim() || 'agent',
     pollIntervalMs: parsePositiveNumber(env.EVENT_POLL_INTERVAL_SEC, 300) * 1000,
     maxLoadPerCpu: parsePositiveNumber(env.EVENT_MAX_LOAD, 0.8),
-    maxConcurrent: Math.floor(parsePositiveNumber(env.EVENT_MAX_CONCURRENT, 1)),
+    maxConcurrent: Math.floor(parsePositiveNumber(env.EVENT_MAX_CONCURRENT, 5)),
     notifyChannelId: env.EVENT_NOTIFY_CHANNEL_ID?.trim() || undefined,
     claudePath: env.EVENT_CLAUDE_PATH?.trim() || undefined,
     wakeChannelId: env.EVENT_WAKE_CHANNEL_ID?.trim() || undefined,
@@ -103,9 +108,10 @@ export function buildEventPrompt(event: AgentEvent): string {
     '## 進め方',
     '',
     '- issue を読み、対応が必要かを判断してください',
-    '- 対応不要と判断したら、理由を issue にコメントして終えてください',
+    '- 対応不要と判断したら、理由を issue にコメントし、gh で issue を close してください',
     '- 対応する場合は、結果を gh で issue にコメントするか PR を作ってください',
     '- このセッションは人が Remote Control から見ています。判断に迷ったら、進める前に質問してください',
+    '- issue が close されると、このセッションは入力待ちになったところで自動で閉じます',
   ].join('\n');
 }
 
@@ -123,6 +129,10 @@ export interface EventDispatcherOptions {
   launch: (prompt: string, event: AgentEvent) => Promise<LaunchResult>;
   /** tmux のセッションがまだあるか */
   isAlive: (sessionName: string) => Promise<boolean>;
+  /** Claude Code が作業中か入力待ちか。未指定ならすべて unknown（作業中として数える） */
+  getActivity?: (sessionName: string) => SessionActivity;
+  /** tmux のセッションを閉じる。未指定なら issue が close されても閉じない */
+  close?: (sessionName: string) => Promise<void>;
   /** 通知を送る。channelId がなければ既定の通知先に送る。失敗しても処理は続ける */
   notify: (message: string, channelId?: string) => Promise<void>;
   maxConcurrent: number;
@@ -245,7 +255,10 @@ export class EventDispatcher {
         logError(`check tmux session ${sessionName}`, err);
         continue;
       }
-      if (alive) continue;
+      if (alive) {
+        await this.closeIfFinished(record, sessionName);
+        continue;
+      }
       this.options.store.setStatus(event, 'done');
       console.log(`[event-dispatcher] Session ${sessionName} closed (${event.source}:${event.id})`);
       await this.safeNotify(
@@ -255,9 +268,49 @@ export class EventDispatcher {
     }
   }
 
+  /**
+   * issue が close されていれば、セッションを閉じて終了にする
+   * Claude Code が作業中なら閉じない（close のあとに PR のコメントなどを書いている途中かもしれない）
+   * 状態が unknown なのはフックを付ける前の版で起動したセッションだけなので、閉じる
+   */
+  private async closeIfFinished(record: EventRecord, sessionName: string): Promise<void> {
+    const { event } = record;
+    const source = this.options.sources.find((s) => s.name === event.source);
+    if (!this.options.close || !source?.isClosed) return;
+    if (this.activity(sessionName) === 'busy') return;
+    try {
+      if (!(await source.isClosed(event))) return;
+      // gh を待つ間に、人が続きを指示しているかもしれない
+      if (this.activity(sessionName) === 'busy') return;
+      await this.options.close(sessionName);
+    } catch (err) {
+      // 確かめられない・閉じられないときは起動中のままにし、次のポーリングでやり直す
+      logError(`close finished session ${sessionName}`, err);
+      return;
+    }
+    this.options.store.setStatus(event, 'done');
+    console.log(`[event-dispatcher] Closed ${sessionName} (${event.source}:${event.id} is closed)`);
+    await this.safeNotify(
+      `🏁 終了: ${event.id} ${event.title}（issue が close されたので ${sessionName} を閉じました）`,
+      event.notifyChannelId
+    );
+  }
+
+  private activity(sessionName: string): SessionActivity {
+    return this.options.getActivity?.(sessionName) ?? 'unknown';
+  }
+
+  /** 同時起動数に数えるセッションの数。入力待ちのものは数えない */
+  private countActive(): number {
+    return this.options.store
+      .listByStatus('running')
+      .filter((record) => !record.sessionName || this.activity(record.sessionName) !== 'idle')
+      .length;
+  }
+
   /** 空きと負荷が許す限り、キューの古い順に起動する */
   private async drain(): Promise<void> {
-    while (this.options.store.countByStatus('running') < this.options.maxConcurrent) {
+    while (this.countActive() < this.options.maxConcurrent) {
       const next = this.options.store.nextQueued();
       if (!next) return;
       if (!this.options.isLoadAcceptable()) {

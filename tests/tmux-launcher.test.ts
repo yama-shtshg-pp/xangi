@@ -1,5 +1,14 @@
-import { describe, it, expect, vi } from 'vitest';
-import { TmuxLauncher, resolveCommandPath, toSessionName } from '../src/tmux-launcher.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import {
+  TmuxLauncher,
+  buildActivityHookSettings,
+  resolveCommandPath,
+  toSessionName,
+} from '../src/tmux-launcher.js';
 
 /** execFile がコマンドの失敗で投げる形のエラー */
 function exitError(code: number | string, stderr = '') {
@@ -160,6 +169,122 @@ describe('TmuxLauncher', () => {
   it('同じ名前のセッションがあれば起動しない', async () => {
     const exec = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
     expect(await makeLauncher(exec).launch('cc-a-issue1', 'p')).toBe(false);
+    expect(exec).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('buildActivityHookSettings', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "tmux-hook-'q "));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function commandOf(settings: string, event: string): string {
+    const hooks = JSON.parse(settings).hooks[event] as { hooks: { command: string }[] }[];
+    return hooks[0].hooks[0].command;
+  }
+
+  it('返答を終えたら idle、指示やツールの前後で busy を書く（引用符や空白を含むパスでも）', () => {
+    const statePath = join(dir, 'cc-a-issue1');
+    const settings = buildActivityHookSettings(statePath);
+    for (const [event, state] of [
+      ['Stop', 'idle'],
+      ['Notification', 'idle'],
+      ['UserPromptSubmit', 'busy'],
+      ['PreToolUse', 'busy'],
+      ['PostToolUse', 'busy'],
+    ]) {
+      execFileSync('/bin/sh', ['-c', commandOf(settings, event)]);
+      expect(readFileSync(statePath, 'utf-8')).toBe(state);
+    }
+  });
+
+  it('Notification は入力を待つ通知だけに絞る', () => {
+    const notification = JSON.parse(buildActivityHookSettings('/s')).hooks.Notification;
+    expect(notification[0].matcher).toBe('permission_prompt|idle_prompt|elicitation_dialog');
+  });
+});
+
+describe('TmuxLauncher の状態の記録', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'tmux-state-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeStateLauncher(exec: ReturnType<typeof vi.fn>) {
+    return new TmuxLauncher({
+      tmuxPath: '/opt/homebrew/bin/tmux',
+      claudePath: '/Users/me/.local/bin/claude',
+      cwd: '/workspace',
+      stateDir: join(dir, 'event-sessions'),
+      exec,
+      sleep: async () => {},
+    });
+  }
+
+  it('stateDir があれば --settings でフックを渡し、前の状態を busy で上書きして起動する', async () => {
+    const stateDir = join(dir, 'event-sessions');
+    mkdirSync(stateDir);
+    writeFileSync(join(stateDir, 'cc-a-issue1'), 'idle');
+    const exec = vi.fn().mockRejectedValueOnce(noSession()).mockResolvedValue(ok);
+    const launcher = makeStateLauncher(exec);
+
+    await launcher.launch('cc-a-issue1', 'prompt');
+
+    const args = exec.mock.calls[1][1] as string[];
+    const i = args.indexOf('--settings');
+    expect(args[i + 1]).toBe(buildActivityHookSettings(join(stateDir, 'cc-a-issue1')));
+    expect(args.at(-1)).toBe('prompt');
+    expect(launcher.getActivity('cc-a-issue1')).toBe('busy');
+  });
+
+  it('getActivity はフックが書いた状態を返し、なければ unknown', () => {
+    const launcher = makeStateLauncher(vi.fn());
+    expect(launcher.getActivity('cc-a-issue1')).toBe('unknown');
+    mkdirSync(join(dir, 'event-sessions'));
+    writeFileSync(join(dir, 'event-sessions', 'cc-a-issue1'), 'idle');
+    expect(launcher.getActivity('cc-a-issue1')).toBe('idle');
+    writeFileSync(join(dir, 'event-sessions', 'cc-a-issue1'), 'busy');
+    expect(launcher.getActivity('cc-a-issue1')).toBe('busy');
+  });
+
+  it('stateDir がなければフックを付けず、状態は unknown', async () => {
+    const exec = vi.fn().mockRejectedValueOnce(noSession()).mockResolvedValue(ok);
+    const launcher = makeLauncher(exec);
+    await launcher.launch('cc-a-issue1', 'prompt');
+    expect(exec.mock.calls[1][1]).not.toContain('--settings');
+    expect(launcher.getActivity('cc-a-issue1')).toBe('unknown');
+  });
+
+  it('kill は完全一致でセッションを閉じ、状態の記録を消す', async () => {
+    mkdirSync(join(dir, 'event-sessions'));
+    const statePath = join(dir, 'event-sessions', 'cc-a-issue1');
+    writeFileSync(statePath, 'idle');
+    const exec = vi.fn().mockResolvedValue(ok);
+
+    await makeStateLauncher(exec).kill('cc-a-issue1');
+
+    expect(exec).toHaveBeenLastCalledWith(
+      '/opt/homebrew/bin/tmux',
+      ['kill-session', '-t', '=cc-a-issue1'],
+      expect.anything()
+    );
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it('kill はセッションがなければ kill-session を呼ばない', async () => {
+    const exec = vi.fn().mockRejectedValue(noSession());
+    await makeStateLauncher(exec).kill('cc-a-issue1');
     expect(exec).toHaveBeenCalledTimes(1);
   });
 });
