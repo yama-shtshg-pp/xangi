@@ -17,10 +17,25 @@ import { KEY_PATTERN, normalizeKey } from './watch-repos.js';
 
 /** メンションの本文から、メンションを除いた key と残りの本文を取り出す */
 export function parseMention(text: string): { key?: string; rest: string } {
-  const stripped = text.replace(/<@[A-Z0-9]+>/gi, ' ').trim();
-  const match = /^(\S+)\s*([\s\S]*)$/.exec(stripped);
+  const match = /^(\S+)\s*([\s\S]*)$/.exec(stripMention(text));
   if (!match) return { rest: '' };
   return { key: match[1], rest: match[2].trim() };
+}
+
+function stripMention(text: string): string {
+  return text.replace(/<@[A-Z0-9]+>/gi, ' ').trim();
+}
+
+/**
+ * チャンネルの説明（purpose）とトピック（topic）から、既定の key（`xangi:<key>`）を取り出す
+ * 両方にあれば説明を優先する。長すぎる key もそのまま返し、ウォッチリストにないことを返事で伝える
+ */
+export function parseChannelDefaultKey(purpose?: string, topic?: string): string | undefined {
+  for (const text of [purpose, topic]) {
+    const match = /(?<![A-Za-z0-9_-])xangi:([A-Za-z0-9_-]+)/.exec(text ?? '');
+    if (match) return match[1];
+  }
+  return undefined;
 }
 
 /** handleMention が読む Slack のメッセージの項目 */
@@ -174,6 +189,11 @@ export interface MentionInput {
   loadParentText: () => Promise<string>;
   /** メッセージへのリンクを取る。取れなければ undefined */
   getPermalink: () => Promise<string | undefined>;
+  /**
+   * チャンネルの説明・トピックに書かれた既定の key を取る。なければ undefined
+   * メンションで key を指定しなかったときだけ呼ぶ
+   */
+  loadChannelDefaultKey?: () => Promise<string | undefined>;
 }
 
 export interface SlackIssueCreatorOptions {
@@ -205,11 +225,17 @@ export class SlackIssueCreator {
 
   /**
    * メンションを処理し、スレッドに返す文を返す
-   * 最初の語が key の形でなければ undefined を返す（呼び出し側は会話として扱う）
+   * 最初の語が key の形でなく、チャンネルの既定の key もなければ undefined を返す（呼び出し側は会話として扱う）
    */
   async handleMention(input: MentionInput): Promise<string | undefined> {
-    const { key, rest } = parseMention(input.text);
-    if (key && !KEY_PATTERN.test(key)) return undefined;
+    const parsed = parseMention(input.text);
+    // 最初の語が key の形なら、チャンネルの既定より優先する
+    const explicitKey = parsed.key && KEY_PATTERN.test(parsed.key) ? parsed.key : undefined;
+    const defaultKey = explicitKey ? undefined : await input.loadChannelDefaultKey?.();
+    if (parsed.key && !explicitKey && !defaultKey) return undefined;
+    const key = explicitKey ?? defaultKey;
+    // 既定の key を使うときは、メンションの文をすべて補足（スレッドの外なら本文）にする
+    const rest = explicitKey ? parsed.rest : stripMention(input.text);
 
     // 記録を見る前に処理中にする。記録を見てから処理中にするまでの間に 2 回目が来ると、両方が立ててしまう
     const pendingKey = `${input.channel}:${input.ts}`;
@@ -231,11 +257,14 @@ export class SlackIssueCreator {
       }
       const target = targets.find((t) => t.key && normalizeKey(t.key) === normalizeKey(key));
       if (!target) {
-        return `key \`${key}\` の項目がありません\n${keyTable(targets)}`;
+        const where = explicitKey ? '' : '（チャンネルの説明・トピックで指定）';
+        return `key \`${key}\`${where} の項目がありません\n${keyTable(targets)}`;
       }
       // 中身のない issue で Claude Code を起動しない
       if (!input.inThread && !rest) {
-        return 'スレッドの外では、key のあとに issue の内容を書いてください（例: `@xangi 1 Cron が止まった`）';
+        return explicitKey
+          ? 'スレッドの外では、key のあとに issue の内容を書いてください（例: `@xangi 1 Cron が止まった`）'
+          : 'スレッドの外では、メンションのあとに issue の内容を書いてください（例: `@xangi 定期実行が止まった`）';
       }
 
       const text = input.inThread ? await input.loadParentText() : rest;
