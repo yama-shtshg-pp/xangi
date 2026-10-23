@@ -7,6 +7,7 @@ import {
   SlackIssueStore,
   buildIssue,
   extractMessageText,
+  parseChannelDefaultKey,
   parseMention,
   type MentionInput,
 } from '../src/slack-issue.js';
@@ -296,6 +297,114 @@ describe('SlackIssueCreator', () => {
       gh,
     });
     expect(await creator.handleMention(input())).toContain('watch-repos.json がありません');
+  });
+
+  describe('チャンネルの既定の key', () => {
+    const withDefault = (key: string | undefined) => ({
+      loadChannelDefaultKey: vi.fn(async () => key),
+    });
+
+    it('メンションだけなら、既定のリポジトリに issue を立てる', async () => {
+      const reply = await makeCreator().handleMention(
+        input({ text: '<@U0>', ...withDefault('jra') })
+      );
+      expect(reply).toContain('o/b に issue を立てました');
+      const args = gh.mock.calls[0][0] as string[];
+      expect(args[args.indexOf('--repo') + 1]).toBe('o/b');
+      expect(args[args.indexOf('--label') + 1]).toBe('bot');
+    });
+
+    it('ウォッチリストにある key を付けたら、既定より優先し、既定は読まない', async () => {
+      const loader = withDefault('jra');
+      await makeCreator().handleMention(input({ text: '<@U0> 1 急ぎ', ...loader }));
+      const args = gh.mock.calls[0][0] as string[];
+      expect(args[args.indexOf('--repo') + 1]).toBe('o/a');
+      expect(loader.loadChannelDefaultKey).not.toHaveBeenCalled();
+    });
+
+    it('最初の語が key の形でなければ、メンションの文を補足にして既定のリポジトリに立てる', async () => {
+      const reply = await makeCreator().handleMention(
+        input({ text: '<@U0> 本番だけで起きる\n再現は不明', ...withDefault('jra') })
+      );
+      expect(reply).toContain('o/b に issue を立てました');
+      const args = gh.mock.calls[0][0] as string[];
+      const body = args[args.indexOf('--body') + 1];
+      expect(body).toContain('## メンションでの補足\n\n本番だけで起きる\n再現は不明');
+      expect(body).toContain('Cron failed\nstack');
+    });
+
+    it('スレッドの外なら、メンションの文を本文にして既定のリポジトリに立てる', async () => {
+      const loadParentText = vi.fn(async () => 'parent');
+      await makeCreator().handleMention(
+        input({
+          text: '<@U0> 定期実行が止まった',
+          inThread: false,
+          loadParentText,
+          ...withDefault('jra'),
+        })
+      );
+      const args = gh.mock.calls[0][0] as string[];
+      expect(args[args.indexOf('--body') + 1]).toContain('定期実行が止まった');
+      expect(loadParentText).not.toHaveBeenCalled();
+    });
+
+    it('スレッドの外でメンションだけなら、内容を書くよう返し、issue は立てない', async () => {
+      const reply = await makeCreator().handleMention(
+        input({ text: '<@U0>', inThread: false, ...withDefault('jra') })
+      );
+      expect(reply).toContain('issue の内容を書いてください');
+      expect(gh).not.toHaveBeenCalled();
+    });
+
+    it('key の形なのにウォッチリストにない語なら、既定には立てず、対応表を返す', async () => {
+      const reply = await makeCreator().handleMention(
+        input({ text: '<@U0> 9', ...withDefault('jra') })
+      );
+      expect(reply).toContain('key `9` の項目がありません');
+      expect(reply).toContain('- `jra` o/b');
+      expect(gh).not.toHaveBeenCalled();
+    });
+
+    it('既定の key がウォッチリストになければ、そのことと対応表を返し、issue は立てない', async () => {
+      const reply = await makeCreator().handleMention(
+        input({ text: '<@U0>', ...withDefault('nope') })
+      );
+      expect(reply).toContain('key `nope`（チャンネルの説明・トピックで指定） の項目がありません');
+      expect(reply).toContain('- `1` o/a');
+      expect(gh).not.toHaveBeenCalled();
+    });
+
+    it('既定がなければ、これまでどおり key の形でない語は会話にする', async () => {
+      expect(
+        await makeCreator().handleMention(
+          input({ text: '<@U0> この関数の意味は？', ...withDefault(undefined) })
+        )
+      ).toBeUndefined();
+      expect(gh).not.toHaveBeenCalled();
+    });
+
+    it('既定のリポジトリでも、同じメッセージには 2 つ目の issue を立てない', async () => {
+      const creator = makeCreator();
+      await creator.handleMention(input({ text: '<@U0>', ...withDefault('jra') }));
+      const reply = await creator.handleMention(input({ text: '<@U0>', ...withDefault('jra') }));
+      expect(reply).toContain('もう立てています');
+      expect(gh).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe('parseChannelDefaultKey', () => {
+  it('説明かトピックの xangi:<key> を取り出し、両方にあれば説明を優先する', () => {
+    expect(parseChannelDefaultKey('jra のエラー xangi:jra です', '')).toBe('jra');
+    expect(parseChannelDefaultKey('', 'xangi:1')).toBe('1');
+    expect(parseChannelDefaultKey('xangi:kn', 'xangi:1')).toBe('kn');
+    expect(parseChannelDefaultKey(undefined, undefined)).toBeUndefined();
+  });
+
+  it('key の後ろの句読点は含めず、別の語の一部の xangi: は拾わない', () => {
+    expect(parseChannelDefaultKey('既定は xangi:jra。', '')).toBe('jra');
+    expect(parseChannelDefaultKey('myxangi:jra', 'xangi:1')).toBe('1');
+    expect(parseChannelDefaultKey('xangi: jra', '')).toBeUndefined();
   });
 });
 

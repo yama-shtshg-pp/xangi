@@ -244,6 +244,7 @@ async function deleteMessage(client: WebClient, channelId: string, arg: string):
 import type { Scheduler } from './scheduler.js';
 import {
   extractMessageText,
+  parseChannelDefaultKey,
   type SlackIssueCreator,
   type SlackMessageLike,
 } from './slack-issue.js';
@@ -424,6 +425,17 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
               return res.permalink;
             } catch (err) {
               console.error('[slack] Failed to get permalink:', err);
+              return undefined;
+            }
+          },
+          // 説明を書き換えたら再起動なしで効くよう、メンションのたびに読む
+          loadChannelDefaultKey: async () => {
+            try {
+              const res = await client.conversations.info({ channel: event.channel });
+              return parseChannelDefaultKey(res.channel?.purpose?.value, res.channel?.topic?.value);
+            } catch (err) {
+              // channels:read（非公開なら groups:read）がないと読めない。指定なしとして扱う
+              console.error('[slack] Failed to read channel purpose/topic:', err);
               return undefined;
             }
           },
