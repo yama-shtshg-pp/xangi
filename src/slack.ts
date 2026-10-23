@@ -382,6 +382,9 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
     }
   });
 
+  // ログに残した conversations.info の失敗（チャンネル:エラー）
+  const channelInfoErrorsLogged = new Set<string>();
+
   // メンション時の処理
   app.event('app_mention', async ({ event, say, client }) => {
     // 合図のチャンネルでは、メンションされても会話として扱わない（合図は message イベントで受ける）
@@ -435,7 +438,13 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
               return parseChannelDefaultKey(res.channel?.purpose?.value, res.channel?.topic?.value);
             } catch (err) {
               // channels:read（非公開なら groups:read）がないと読めない。指定なしとして扱う
-              console.error('[slack] Failed to read channel purpose/topic:', err);
+              // 権限がないと会話のメンションのたびに失敗するので、チャンネルとエラーごとに 1 回だけ残す
+              const code = (err as { data?: { error?: string } }).data?.error ?? String(err);
+              const logKey = `${event.channel}:${code}`;
+              if (!channelInfoErrorsLogged.has(logKey)) {
+                channelInfoErrorsLogged.add(logKey);
+                console.error('[slack] Failed to read channel purpose/topic:', err);
+              }
               return undefined;
             }
           },

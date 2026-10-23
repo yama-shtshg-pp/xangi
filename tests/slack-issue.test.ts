@@ -369,7 +369,7 @@ describe('SlackIssueCreator', () => {
       const reply = await makeCreator().handleMention(
         input({ text: '<@U0>', ...withDefault('nope') })
       );
-      expect(reply).toContain('key `nope`（チャンネルの説明・トピックで指定） の項目がありません');
+      expect(reply).toContain('key `nope`（チャンネルの説明・トピックで指定）の項目がありません');
       expect(reply).toContain('- `1` o/a');
       expect(gh).not.toHaveBeenCalled();
     });
@@ -405,6 +405,13 @@ describe('parseChannelDefaultKey', () => {
     expect(parseChannelDefaultKey('既定は xangi:jra。', '')).toBe('jra');
     expect(parseChannelDefaultKey('myxangi:jra', 'xangi:1')).toBe('1');
     expect(parseChannelDefaultKey('xangi: jra', '')).toBeUndefined();
+  });
+
+  it('URL やパスの一部は拾わず、括弧の中や大文字の XANGI: は拾う', () => {
+    expect(parseChannelDefaultKey('手順 https://wiki/xangi:setup', 'xangi:1')).toBe('1');
+    expect(parseChannelDefaultKey('foo.xangi:setup', '')).toBeUndefined();
+    expect(parseChannelDefaultKey('エラー通知（xangi:jra）', '')).toBe('jra');
+    expect(parseChannelDefaultKey('XANGI:kn', '')).toBe('kn');
   });
 });
 

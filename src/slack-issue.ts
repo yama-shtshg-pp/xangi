@@ -29,10 +29,11 @@ function stripMention(text: string): string {
 /**
  * チャンネルの説明（purpose）とトピック（topic）から、既定の key（`xangi:<key>`）を取り出す
  * 両方にあれば説明を優先する。長すぎる key もそのまま返し、ウォッチリストにないことを返事で伝える
+ * URL やパスの一部（`https://wiki/xangi:setup`）は拾わない
  */
 export function parseChannelDefaultKey(purpose?: string, topic?: string): string | undefined {
   for (const text of [purpose, topic]) {
-    const match = /(?<![A-Za-z0-9_-])xangi:([A-Za-z0-9_-]+)/.exec(text ?? '');
+    const match = /(?<![A-Za-z0-9_./:-])xangi:([A-Za-z0-9_-]+)/i.exec(text ?? '');
     if (match) return match[1];
   }
   return undefined;
@@ -257,8 +258,8 @@ export class SlackIssueCreator {
       }
       const target = targets.find((t) => t.key && normalizeKey(t.key) === normalizeKey(key));
       if (!target) {
-        const where = explicitKey ? '' : '（チャンネルの説明・トピックで指定）';
-        return `key \`${key}\`${where} の項目がありません\n${keyTable(targets)}`;
+        const where = explicitKey ? ' ' : '（チャンネルの説明・トピックで指定）';
+        return `key \`${key}\`${where}の項目がありません\n${keyTable(targets)}`;
       }
       // 中身のない issue で Claude Code を起動しない
       if (!input.inThread && !rest) {
