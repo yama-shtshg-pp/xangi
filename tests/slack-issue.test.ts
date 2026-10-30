@@ -24,6 +24,12 @@ describe('parseMention', () => {
   it('メンションだけなら key はない', () => {
     expect(parseMention('<@U123>  ')).toEqual({ rest: '' });
   });
+
+  it('改行してから書いた本文の最初の語は key にしない', () => {
+    expect(parseMention('<@U123> \nPub write に変更\n詳細')).toEqual({
+      rest: 'Pub write に変更\n詳細',
+    });
+  });
 });
 
 describe('extractMessageText', () => {
@@ -365,6 +371,17 @@ describe('SlackIssueCreator', () => {
       expect(gh).not.toHaveBeenCalled();
     });
 
+    it('改行してから英数字で書き始めた本文は key と見ず、補足にして既定のリポジトリに立てる', async () => {
+      const reply = await makeCreator().handleMention(
+        input({ text: '<@U0> \nPub write に変更', ...withDefault('jra') })
+      );
+      expect(reply).toContain('o/b に issue を立てました');
+      const args = gh.mock.calls[0][0] as string[];
+      expect(args[args.indexOf('--body') + 1]).toContain(
+        '## メンションでの補足\n\nPub write に変更'
+      );
+    });
+
     it('既定の key がウォッチリストになければ、そのことと対応表を返し、issue は立てない', async () => {
       const reply = await makeCreator().handleMention(
         input({ text: '<@U0>', ...withDefault('nope') })
@@ -378,6 +395,15 @@ describe('SlackIssueCreator', () => {
       expect(
         await makeCreator().handleMention(
           input({ text: '<@U0> この関数の意味は？', ...withDefault(undefined) })
+        )
+      ).toBeUndefined();
+      expect(gh).not.toHaveBeenCalled();
+    });
+
+    it('既定がなければ、改行してから書いた本文は会話にする', async () => {
+      expect(
+        await makeCreator().handleMention(
+          input({ text: '<@U0>\nPub write の意味は？', ...withDefault(undefined) })
         )
       ).toBeUndefined();
       expect(gh).not.toHaveBeenCalled();

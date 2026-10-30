@@ -15,10 +15,13 @@ import { defaultGhExec, type GhExec, type RepoTarget } from './event-source-gith
 import type { SummarizeTitle } from './title-summarizer.js';
 import { KEY_PATTERN, normalizeKey } from './watch-repos.js';
 
-/** メンションの本文から、メンションを除いた key と残りの本文を取り出す */
+/**
+ * メンションの本文から、メンションを除いた key と残りの本文を取り出す
+ * key はメンションと同じ行の最初の語だけ。改行してから書いた本文（`Pub write ...`）の最初の語は key と見ない
+ */
 export function parseMention(text: string): { key?: string; rest: string } {
-  const match = /^(\S+)\s*([\s\S]*)$/.exec(stripMention(text));
-  if (!match) return { rest: '' };
+  const match = /^[^\S\n]*(\S+)([\s\S]*)$/.exec(text.trim().replace(/<@[A-Z0-9]+>/gi, ' '));
+  if (!match) return { rest: stripMention(text) };
   return { key: match[1], rest: match[2].trim() };
 }
 
@@ -233,7 +236,7 @@ export class SlackIssueCreator {
     // 最初の語が key の形なら、チャンネルの既定より優先する
     const explicitKey = parsed.key && KEY_PATTERN.test(parsed.key) ? parsed.key : undefined;
     const defaultKey = explicitKey ? undefined : await input.loadChannelDefaultKey?.();
-    if (parsed.key && !explicitKey && !defaultKey) return undefined;
+    if (!explicitKey && !defaultKey && stripMention(input.text)) return undefined;
     const key = explicitKey ?? defaultKey;
     // 既定の key を使うときは、メンションの文をすべて補足（スレッドの外なら本文）にする
     const rest = explicitKey ? parsed.rest : stripMention(input.text);
