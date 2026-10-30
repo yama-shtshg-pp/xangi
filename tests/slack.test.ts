@@ -7,12 +7,7 @@ import {
   shouldSkipThreadReply,
   toThreadMessages,
 } from '../src/slack.js';
-import {
-  ISSUE_CANCEL_ACTION,
-  ISSUE_CREATE_ACTION,
-  decodeIssueRequest,
-  type IssueRequest,
-} from '../src/slack-issue.js';
+import { ISSUE_CREATE_ACTION, decodeIssueRequest, type IssueRequest } from '../src/slack-issue.js';
 
 describe('handleEventWake', () => {
   let onWake: ReturnType<typeof vi.fn>;
@@ -121,7 +116,7 @@ describe('buildIssueConfirmBlocks', () => {
     title: '[Slack] t',
   };
 
-  it('確認の文と「作る」「やめる」のボタンを並べ、どちらの値からも依頼を読み戻せる', () => {
+  it('確認の文と「作る」のボタンだけを並べ、ボタンの値から依頼を読み戻せる', () => {
     const blocks = buildIssueConfirmBlocks('o/a に issue を作りますか？', request);
     expect(blocks[0]).toEqual({
       type: 'section',
@@ -129,7 +124,7 @@ describe('buildIssueConfirmBlocks', () => {
     });
     const elements = (blocks[1] as { elements: Array<{ action_id: string; value: string }> })
       .elements;
-    expect(elements.map((e) => e.action_id)).toEqual([ISSUE_CREATE_ACTION, ISSUE_CANCEL_ACTION]);
+    expect(elements.map((e) => e.action_id)).toEqual([ISSUE_CREATE_ACTION]);
     for (const e of elements) expect(decodeIssueRequest(e.value)).toEqual(request);
   });
 });

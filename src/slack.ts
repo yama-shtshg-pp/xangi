@@ -243,7 +243,6 @@ async function deleteMessage(client: WebClient, channelId: string, arg: string):
 
 import type { Scheduler } from './scheduler.js';
 import {
-  ISSUE_CANCEL_ACTION,
   ISSUE_CREATE_ACTION,
   decodeIssueRequest,
   encodeIssueRequest,
@@ -278,12 +277,6 @@ export function buildIssueConfirmBlocks(text: string, request: IssueRequest): Kn
           text: { type: 'plain_text', text: '作る' },
           style: 'primary',
           action_id: ISSUE_CREATE_ACTION,
-          value,
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: 'やめる' },
-          action_id: ISSUE_CANCEL_ACTION,
           value,
         },
       ],
@@ -553,27 +546,6 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
         reply = `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`;
       }
       await update(reply);
-    }
-  );
-
-  // ボタンアクション: issue を作らない
-  app.action<BlockAction<ButtonAction>>(
-    ISSUE_CANCEL_ACTION,
-    async ({ ack, body, action, client: actionClient }) => {
-      await ack();
-      if (!isAllowedUser(body.user?.id)) return;
-      const channelId = body.channel?.id;
-      const messageTs = body.message?.ts;
-      if (!channelId || !messageTs) return;
-      const title = decodeIssueRequest(action.value)?.title;
-      await actionClient.chat
-        .update({
-          channel: channelId,
-          ts: messageTs,
-          text: `issue の作成を取りやめました${title ? `: ${title}` : ''}`,
-          blocks: [],
-        })
-        .catch((err) => console.error('[slack] Failed to update issue confirmation:', err));
     }
   );
 

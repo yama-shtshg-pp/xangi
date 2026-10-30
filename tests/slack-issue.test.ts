@@ -488,7 +488,8 @@ describe('SlackIssueCreator', () => {
     });
 
     it('改行してから英数字で書き始めた本文は key と見ず、補足にして既定のリポジトリに立てる', async () => {
-      const reply = await makeCreator().handleMention(
+      const reply = await run(
+        makeCreator(),
         input({ text: '<@U0> \nPub write に変更', ...withDefault('jra') })
       );
       expect(reply).toContain('o/b に issue を立てました');
