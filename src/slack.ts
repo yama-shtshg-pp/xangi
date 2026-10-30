@@ -1,4 +1,4 @@
-import { App, LogLevel } from '@slack/bolt';
+import { App, LogLevel, type BlockAction, type ButtonAction } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import type { Config } from './config.js';
 import type { AgentRunner } from './agent-runner.js';
@@ -243,11 +243,123 @@ async function deleteMessage(client: WebClient, channelId: string, arg: string):
 
 import type { Scheduler } from './scheduler.js';
 import {
+  ISSUE_CANCEL_ACTION,
+  ISSUE_CREATE_ACTION,
+  decodeIssueRequest,
+  encodeIssueRequest,
   extractMessageText,
   parseChannelDefaultKey,
+  type IssueRequest,
+  type MentionReply,
   type SlackIssueCreator,
   type SlackMessageLike,
+  type ThreadMessage,
 } from './slack-issue.js';
+
+/** 許可リストのユーザーか（`*` なら誰でも）。ユーザーが分からなければ許可しない */
+export function isAllowedSlackUser(
+  allowedUsers: string[] | undefined,
+  userId: string | undefined
+): boolean {
+  if (allowedUsers?.includes('*')) return true;
+  return !!userId && !!allowedUsers?.includes(userId);
+}
+
+/** issue を立てるかを確かめるメッセージのブロック */
+export function buildIssueConfirmBlocks(text: string, request: IssueRequest): KnownBlock[] {
+  const value = encodeIssueRequest(request);
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text } },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '作る' },
+          style: 'primary',
+          action_id: ISSUE_CREATE_ACTION,
+          value,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'やめる' },
+          action_id: ISSUE_CANCEL_ACTION,
+          value,
+        },
+      ],
+    },
+  ];
+}
+
+/** conversations.replies が返すメッセージのうち、読む項目 */
+export interface RawThreadMessage extends SlackMessageLike {
+  ts?: string;
+  user?: string;
+  bot_id?: string;
+  username?: string;
+  bot_profile?: { name?: string };
+}
+
+/**
+ * スレッドのメッセージを、mentionTs までに絞って古い順に並べる
+ * xangi 自身の投稿（前の確認や返事）は issue の材料ではないので除く。ほかの Bot の通知は残す
+ */
+export function toThreadMessages(
+  messages: RawThreadMessage[],
+  mentionTs: string,
+  self: { userId?: string; botId?: string }
+): ThreadMessage[] {
+  return messages
+    .filter((m) => m.ts && Number(m.ts) <= Number(mentionTs))
+    .filter(
+      (m) => !(self.botId && m.bot_id === self.botId) && !(self.userId && m.user === self.userId)
+    )
+    .sort((a, b) => Number(a.ts) - Number(b.ts))
+    .map((m) => ({
+      ts: m.ts as string,
+      author: m.user ? `<@${m.user}>` : (m.bot_profile?.name ?? m.username ?? 'Bot'),
+      text: extractMessageText(m),
+    }));
+}
+
+/** ts のメッセージ（スレッドなら親）から mentionTs までを読む */
+async function loadThreadMessages(
+  client: WebClient,
+  channel: string,
+  ts: string,
+  mentionTs: string,
+  self: { userId?: string; botId?: string }
+): Promise<ThreadMessage[]> {
+  const messages: RawThreadMessage[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await client.conversations.replies({
+      channel,
+      ts,
+      latest: mentionTs,
+      inclusive: true,
+      limit: 200,
+      cursor,
+    });
+    messages.push(...((res.messages ?? []) as RawThreadMessage[]));
+    cursor = res.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+  return toThreadMessages(messages, mentionTs, self);
+}
+
+async function getPermalink(
+  client: WebClient,
+  channel: string,
+  ts: string
+): Promise<string | undefined> {
+  try {
+    const res = await client.chat.getPermalink({ channel, message_ts: ts });
+    return res.permalink;
+  } catch (err) {
+    console.error('[slack] Failed to get permalink:', err);
+    return undefined;
+  }
+}
 
 export interface SlackChannelOptions {
   config: Config;
@@ -382,6 +494,89 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
     }
   });
 
+  const isAllowedUser = (userId: string | undefined) =>
+    isAllowedSlackUser(config.slack.allowedUsers, userId);
+
+  // xangi 自身の投稿を見分ける ID。失敗したら次に読むときに取り直す
+  let selfIds: Promise<{ userId?: string; botId?: string }> | undefined;
+  const getSelfIds = () =>
+    (selfIds ??= app.client.auth
+      .test()
+      .then((res) => ({ userId: res.user_id, botId: res.bot_id }))
+      .catch((err) => {
+        console.error('[slack] Failed to read own bot id:', err);
+        selfIds = undefined;
+        return {};
+      }));
+  const issueInput = (
+    client: WebClient,
+    request: Pick<IssueRequest, 'channel' | 'ts' | 'mentionTs'>
+  ) => ({
+    loadMessages: async () =>
+      loadThreadMessages(
+        client,
+        request.channel,
+        request.ts,
+        request.mentionTs,
+        await getSelfIds()
+      ),
+    getPermalink: () => getPermalink(client, request.channel, request.ts),
+  });
+
+  // ボタンアクション: issue を作る
+  app.action<BlockAction<ButtonAction>>(
+    ISSUE_CREATE_ACTION,
+    async ({ ack, body, action, client: actionClient }) => {
+      await ack();
+      if (!isAllowedUser(body.user?.id)) return;
+      const channelId = body.channel?.id;
+      const messageTs = body.message?.ts;
+      if (!channelId || !messageTs) return;
+      const update = (text: string) =>
+        actionClient.chat
+          .update({ channel: channelId, ts: messageTs, text, blocks: [] })
+          .catch((err) => console.error('[slack] Failed to update issue confirmation:', err));
+
+      const request = decodeIssueRequest(action.value);
+      const creator = options.mentionIssue?.();
+      if (!request || !creator) {
+        await update('⚠️ issue を立てられませんでした。もう一度メンションしてください');
+        return;
+      }
+      // 先にボタンを消し、続けて押されないようにする（二重作成は createIssue でも防ぐ）
+      await update(`⏳ issue を作成中です: ${request.title}`);
+      let reply: string;
+      try {
+        reply = await creator.createIssue(request, issueInput(actionClient, request));
+      } catch (err) {
+        console.error('[slack] Failed to create issue from confirmation:', err);
+        reply = `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      await update(reply);
+    }
+  );
+
+  // ボタンアクション: issue を作らない
+  app.action<BlockAction<ButtonAction>>(
+    ISSUE_CANCEL_ACTION,
+    async ({ ack, body, action, client: actionClient }) => {
+      await ack();
+      if (!isAllowedUser(body.user?.id)) return;
+      const channelId = body.channel?.id;
+      const messageTs = body.message?.ts;
+      if (!channelId || !messageTs) return;
+      const title = decodeIssueRequest(action.value)?.title;
+      await actionClient.chat
+        .update({
+          channel: channelId,
+          ts: messageTs,
+          text: `issue の作成を取りやめました${title ? `: ${title}` : ''}`,
+          blocks: [],
+        })
+        .catch((err) => console.error('[slack] Failed to update issue confirmation:', err));
+    }
+  );
+
   // ログに残した conversations.info の失敗（チャンネル:エラー）
   const channelInfoErrorsLogged = new Set<string>();
 
@@ -400,37 +595,16 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
 
     const creator = options.mentionIssue?.();
     if (creator) {
-      // スレッドの中なら親メッセージ（エラー通知など）を issue にする
+      // スレッドの中なら、親メッセージ（エラー通知など）からメンションまでを issue にする
       const sourceTs = event.thread_ts ?? event.ts;
-      let reply: string | undefined;
+      const target = { channel: event.channel, ts: sourceTs, mentionTs: event.ts };
+      let reply: MentionReply | undefined;
       try {
         reply = await creator.handleMention({
+          ...target,
           text: event.text || '',
-          channel: event.channel,
-          ts: sourceTs,
           inThread: !!event.thread_ts,
-          loadParentText: async () => {
-            const res = await client.conversations.replies({
-              channel: event.channel,
-              ts: sourceTs,
-              limit: 1,
-              inclusive: true,
-            });
-            const parent = res.messages?.[0];
-            return parent ? extractMessageText(parent as SlackMessageLike) : '';
-          },
-          getPermalink: async () => {
-            try {
-              const res = await client.chat.getPermalink({
-                channel: event.channel,
-                message_ts: sourceTs,
-              });
-              return res.permalink;
-            } catch (err) {
-              console.error('[slack] Failed to get permalink:', err);
-              return undefined;
-            }
-          },
+          ...issueInput(client, target),
           // 説明を書き換えたら再起動なしで効くよう、メンションのたびに読む
           loadChannelDefaultKey: async () => {
             try {
@@ -451,10 +625,16 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
         });
       } catch (err) {
         console.error('[slack] Failed to create issue from mention:', err);
-        reply = `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`;
+        reply = {
+          text: `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`,
+        };
       }
       if (reply !== undefined) {
-        await say({ text: reply, thread_ts: sourceTs });
+        await say({
+          text: reply.text,
+          thread_ts: sourceTs,
+          ...(reply.request ? { blocks: buildIssueConfirmBlocks(reply.text, reply.request) } : {}),
+        });
         return;
       }
       // key の指定でなければ、これまでどおり会話として扱う
