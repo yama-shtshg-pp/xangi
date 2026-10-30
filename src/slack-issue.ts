@@ -2,7 +2,7 @@
  * Slack のメンションから GitHub issue を立てる
  *
  * エラー通知のスレッドで `@<App> <key>` とメンションされたら、ウォッチリストの key の項目の
- * リポジトリに issue を立てるかを、「作る」「やめる」のボタンで確かめる。「作る」が押されたら、
+ * リポジトリに issue を立てるかを、「作る」のボタンで確かめる。「作る」が押されたら、
  * メンションまでのスレッドのやり取りを本文にして、ラベル付きの issue を立てる。
  * 立てた issue は、いつものポーリングで拾って tmux の Claude Code を起動する。
  *
@@ -200,9 +200,8 @@ export class SlackIssueStore {
   }
 }
 
-/** 確認のボタンの action_id */
+/** 確認のボタンの action_id。作らないときはボタンを押さずに放っておく */
 export const ISSUE_CREATE_ACTION = 'xangi_issue_create';
-export const ISSUE_CANCEL_ACTION = 'xangi_issue_cancel';
 
 /**
  * 確認のボタンに持たせる、issue を立てるのに要る情報
