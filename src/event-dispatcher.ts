@@ -17,6 +17,7 @@
 import { cpus, loadavg } from 'os';
 import type { EventSource } from './event-source-github.js';
 import type { AgentEvent, EventRecord, EventStore } from './event-store.js';
+import type { ReadinessVerdict } from './issue-readiness.js';
 import type { SessionActivity } from './tmux-launcher.js';
 
 export interface EventConfig {
@@ -132,6 +133,19 @@ export function buildEventPrompt(event: AgentEvent): string {
   ].join('\n');
 }
 
+/** 内容が足りず起動しなかったときに、issue に付けるコメント */
+export function buildNotReadyComment(missing: string): string {
+  return [
+    'この issue の内容だけでは作業を始めにくいと判定したため、Claude Code を起動していません。',
+    '',
+    `- 足りないもの: ${missing}`,
+    '',
+    'タイトルか本文を書き足すと、次の確認で判定し直します。',
+    '',
+    '（xangi が Jev で判定しました）',
+  ].join('\n');
+}
+
 export interface LaunchResult {
   /** 起動した（または同じ名前ですでにあった）tmux のセッション名 */
   sessionName: string;
@@ -152,6 +166,13 @@ export interface EventDispatcherOptions {
   notify: (message: string, channelId?: string) => Promise<void>;
   maxConcurrent: number;
   isLoadAcceptable: () => boolean;
+  /**
+   * 起動の前に、issue の内容で作業を始められるかを判定する。未指定なら判定しない
+   * notReady なら起動せず、needs_info にする（タイトルか本文が変わったら判定し直す）
+   */
+  checkReadiness?: (event: AgentEvent) => Promise<ReadinessVerdict>;
+  /** 起動しなかった理由を issue にコメントする。失敗しても処理は続ける */
+  comment?: (event: AgentEvent, message: string) => Promise<void>;
   /** 合図を受けてからポーリングするまで待つ時間。この間に来た合図は 1 回のポーリングにまとめる */
   wakeDelayMs?: number;
 }
@@ -236,6 +257,8 @@ export class EventDispatcher {
         for (const event of events) {
           if (this.options.store.enqueue(event)) {
             console.log(`[event-dispatcher] Queued ${event.source}:${event.id}`);
+          } else if (this.options.store.requeueIfUpdated(event)) {
+            console.log(`[event-dispatcher] Requeued updated ${event.source}:${event.id}`);
           }
         }
       }
@@ -313,6 +336,7 @@ export class EventDispatcher {
 
   private async launch(record: EventRecord): Promise<void> {
     const { event } = record;
+    if (await this.holdIfNotReady(event)) return;
     console.log(`[event-dispatcher] Launching ${event.source}:${event.id}`);
     let result: LaunchResult;
     try {
@@ -343,6 +367,36 @@ export class EventDispatcher {
       `🚀 起動しました: ${event.id} ${event.title}\n${event.url}\ntmux attach -t ${result.sessionName}`,
       event.notifyChannelId
     );
+  }
+
+  /** 内容が足りなければ起動せず、issue へのコメントと通知で知らせる。止めたら true */
+  private async holdIfNotReady(event: AgentEvent): Promise<boolean> {
+    if (!this.options.checkReadiness) return false;
+    let verdict: ReadinessVerdict;
+    try {
+      verdict = await this.options.checkReadiness(event);
+    } catch (err) {
+      // 判定できないときは、これまでどおり起動する
+      logError(`check readiness of ${event.id}`, err);
+      return false;
+    }
+    if (!verdict.notReady) return false;
+
+    const missing = verdict.missing ?? '不明';
+    console.log(`[event-dispatcher] Not ready ${event.source}:${event.id} (${missing})`);
+    this.options.store.setStatus(event, 'needs_info', `not ready: ${missing}`);
+    if (this.options.comment) {
+      try {
+        await this.options.comment(event, buildNotReadyComment(missing));
+      } catch (err) {
+        logError(`comment on ${event.id}`, err);
+      }
+    }
+    await this.safeNotify(
+      `✋ 内容が足りないため起動しませんでした: ${event.id} ${event.title}\n${event.url}\n足りないもの: ${missing}`,
+      event.notifyChannelId
+    );
+    return true;
   }
 
   private async safeNotify(message: string, channelId?: string): Promise<void> {

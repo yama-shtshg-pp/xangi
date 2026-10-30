@@ -55,7 +55,8 @@ import { join, resolve } from 'path';
 import { config as dotenvConfig } from 'dotenv';
 import { startWebChat } from './web-chat.js';
 import { EventStore } from './event-store.js';
-import { GitHubIssueSource, type RepoTarget } from './event-source-github.js';
+import { defaultGhExec, GitHubIssueSource, type RepoTarget } from './event-source-github.js';
+import { getJevReadinessMode, IssueReadinessChecker } from './issue-readiness.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { SlackIssueCreator, SlackIssueStore } from './slack-issue.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
@@ -1314,6 +1315,15 @@ async function main() {
       ).catch(() => {});
     }
 
+    // issue の内容で作業を始められるかの判定。issue の起動と Slack のメンションで使う
+    const readiness = new IssueReadinessChecker({
+      mode: getJevReadinessMode(),
+      logPath: join(dataDir, 'logs', 'jev-readiness.jsonl'),
+    });
+    if (readiness.mode !== 'off') {
+      console.log(`[xangi] Jev readiness check: ${readiness.mode}`);
+    }
+
     if (eventStore) {
       eventDispatcher = new EventDispatcher({
         sources: [new GitHubIssueSource(listTargets)],
@@ -1330,6 +1340,17 @@ async function main() {
         },
         isAlive: (sessionName) => launcher.hasSession(sessionName),
         getActivity: (sessionName) => launcher.getActivity(sessionName),
+        checkReadiness: (event) =>
+          readiness.check({
+            source: 'github',
+            repo: event.id.replace(/#\d+$/, ''),
+            id: event.id,
+            title: event.title,
+            body: event.body,
+          }),
+        comment: async (event, message) => {
+          await defaultGhExec(['issue', 'comment', event.url, '--body', message]);
+        },
       });
       // 初回のポーリング（gh の呼び出し）で起動処理を待たせない
       eventDispatcher.start(eventConfig.pollIntervalMs).catch((err) => {
@@ -1353,6 +1374,7 @@ async function main() {
               return watchList.load();
             },
             onCreated: () => dispatcher.wake(),
+            readiness,
             ...(eventClaudePath
               ? { summarizeTitle: createClaudeTitleSummarizer(eventClaudePath) }
               : {}),

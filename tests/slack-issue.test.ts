@@ -16,6 +16,7 @@ import {
   type MentionInput,
 } from '../src/slack-issue.js';
 import type { RepoTarget } from '../src/event-source-github.js';
+import { IssueReadinessChecker } from '../src/issue-readiness.js';
 
 describe('parseMention', () => {
   it('メンションを除き、最初の語を key、残りを本文にする', () => {
@@ -326,6 +327,55 @@ describe('SlackIssueCreator', () => {
     expect(await run(creator, input())).toContain('watch-repos.json がありません');
   });
 
+  describe('作業を始められるかの判定', () => {
+    function withReadiness(ready: number, mode: 'shadow' | 'on' = 'on') {
+      const judge = vi.fn(async () => ({
+        ok: true,
+        ready,
+        missing: 'done' as const,
+        latencyMs: 1,
+      }));
+      const readiness = new IssueReadinessChecker({
+        mode,
+        logPath: join(dir, 'jev-readiness.jsonl'),
+        judge,
+      });
+      const creator = new SlackIssueCreator({
+        listTargets: async () => targets,
+        store,
+        onCreated,
+        gh,
+        readiness,
+      });
+      return { creator, judge };
+    }
+
+    it('タイトルとスレッドのやり取りで判定し、始められなければ確認に足りないものを書き足す。ボタンは残す', async () => {
+      const { creator, judge } = withReadiness(0.1);
+      const reply = await creator.handleMention(input({ text: '<@U0> 1 よろしく' }));
+      expect(judge).toHaveBeenCalledWith(
+        '[Slack] Cron failed',
+        expect.stringContaining('[Alert]\nCron failed')
+      );
+      expect(reply?.text).toContain('作業を始めにくいと判定しました（足りないもの: 完了の条件');
+      expect(reply?.request).toBeDefined();
+    });
+
+    it('始められると判定したら、確認は今と同じ', async () => {
+      const { creator } = withReadiness(0.9);
+      const reply = await creator.handleMention(input());
+      expect(reply?.text).toBe(
+        'o/a に issue を作りますか？\n- タイトル: [Slack] Cron failed\n- 取り込むメッセージ: スレッドの 1 件'
+      );
+    });
+
+    it('shadow では、始められなくても確認は今と同じ', async () => {
+      const { creator } = withReadiness(0.1, 'shadow');
+      const reply = await creator.handleMention(input());
+      expect(reply?.text).not.toContain('作業を始めにくい');
+    });
+  });
+
   describe('確認のボタン', () => {
     it('メンションでは issue を立てず、リポジトリ・タイトル・件数を書いた確認を返す', async () => {
       const reply = await makeCreator().handleMention(input());
@@ -488,7 +538,8 @@ describe('SlackIssueCreator', () => {
     });
 
     it('改行してから英数字で書き始めた本文は key と見ず、補足にして既定のリポジトリに立てる', async () => {
-      const reply = await makeCreator().handleMention(
+      const reply = await run(
+        makeCreator(),
         input({ text: '<@U0> \nPub write に変更', ...withDefault('jra') })
       );
       expect(reply).toContain('o/b に issue を立てました');

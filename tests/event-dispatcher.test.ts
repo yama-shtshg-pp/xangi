@@ -299,6 +299,73 @@ describe('EventDispatcher', () => {
     }
   });
 
+  describe('作業を始められるかの判定', () => {
+    it('始められないと判定したら起動せず、needs_info にして issue にコメントし、通知する', async () => {
+      events = [makeEvent(1)];
+      const comment = vi.fn().mockResolvedValue(undefined);
+      const checkReadiness = vi.fn(async () => ({ notReady: true, missing: '目的' }));
+      await makeDispatcher({ checkReadiness, comment }).poll();
+
+      expect(launch).not.toHaveBeenCalled();
+      expect(store.listByStatus('needs_info')).toHaveLength(1);
+      expect(comment).toHaveBeenCalledWith(
+        events[0],
+        expect.stringContaining('足りないもの: 目的')
+      );
+      expect(messages()[0]).toContain('内容が足りないため起動しませんでした: o/a#1');
+    });
+
+    it('止めた issue の分は同時起動数に数えず、次の issue を起動する', async () => {
+      events = [makeEvent(1), makeEvent(2)];
+      const checkReadiness = vi.fn(async (event: AgentEvent) => ({
+        notReady: event.id === 'o/a#1',
+      }));
+      await makeDispatcher({ checkReadiness }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][1].id).toBe('o/a#2');
+    });
+
+    it('本文が書き足されたら、次のポーリングで判定し直して起動する', async () => {
+      events = [makeEvent(1)];
+      let ready = false;
+      const checkReadiness = vi.fn(async () => ({ notReady: !ready }));
+      const dispatcher = makeDispatcher({ checkReadiness });
+      await dispatcher.poll();
+      // 本文が変わらなければ判定し直さない
+      await dispatcher.poll();
+      expect(checkReadiness).toHaveBeenCalledTimes(1);
+
+      ready = true;
+      events = [{ ...makeEvent(1), body: '書き足した本文' }];
+      await dispatcher.poll();
+      expect(checkReadiness).toHaveBeenCalledTimes(2);
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][0]).toContain('書き足した本文');
+    });
+
+    it('判定が例外を投げたら起動する。コメントが失敗しても通知はする', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      events = [makeEvent(1)];
+      await makeDispatcher({
+        checkReadiness: async () => {
+          throw new Error('boom');
+        },
+      }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+
+      events = [makeEvent(2)];
+      alive.clear();
+      await makeDispatcher({
+        checkReadiness: async () => ({ notReady: true }),
+        comment: async () => {
+          throw new Error('gh failed');
+        },
+      }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(messages().at(-1)).toContain('足りないもの: 不明');
+    });
+  });
+
   describe('xangi の再起動', () => {
     it('セッションが残っていれば起動中のまま扱い、起動し直さない', async () => {
       const event = makeEvent(1);
