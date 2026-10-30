@@ -14,6 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
 import { defaultGhExec, type GhExec, type RepoTarget } from './event-source-github.js';
+import type { IssueReadinessChecker } from './issue-readiness.js';
 import type { SummarizeTitle } from './title-summarizer.js';
 import { KEY_PATTERN, normalizeKey } from './watch-repos.js';
 
@@ -281,6 +282,8 @@ export interface SlackIssueCreatorOptions {
   onCreated: () => void;
   /** 本文からタイトルを要約する。未指定・失敗なら本文の 1 行目を使う */
   summarizeTitle?: SummarizeTitle;
+  /** issue の内容で作業を始められるかの判定。未指定なら判定しない */
+  readiness?: IssueReadinessChecker;
   gh?: GhExec;
 }
 
@@ -354,8 +357,16 @@ export class SlackIssueCreator {
       const text = input.inThread ? (thread[0]?.text ?? '') : rest;
       const note = input.inThread ? rest : '';
       const summarySource = input.inThread ? formatThread(thread) : text;
-      const summary = await this.summarize(summaryInput(summarySource, note));
+      const content = summaryInput(summarySource, note);
+      const summary = await this.summarize(content);
       const { title } = buildIssue(text, undefined, note, summary);
+      const verdict = await this.options.readiness?.check({
+        source: 'slack',
+        repo: target.repo,
+        id: `${input.channel}:${input.ts}`,
+        title,
+        body: content,
+      });
       const request: IssueRequest = {
         key,
         explicitKey: !!explicitKey,
@@ -368,10 +379,14 @@ export class SlackIssueCreator {
       const source = input.inThread
         ? `- 取り込むメッセージ: スレッドの ${thread.length} 件${note ? ' とメンションの補足' : ''}`
         : '- 取り込むメッセージ: メンションの本文';
-      return {
-        text: [`${target.repo} に issue を作りますか？`, `- タイトル: ${title}`, source].join('\n'),
-        request,
-      };
+      const lines = [`${target.repo} に issue を作りますか？`, `- タイトル: ${title}`, source];
+      // ボタンは残し、足りないまま作るかは人が決める
+      if (verdict?.notReady) {
+        lines.push(
+          `- ⚠️ この内容では作業を始めにくいと判定しました（足りないもの: ${verdict.missing ?? '不明'}）。スレッドに書き足してからメンションし直せます`
+        );
+      }
+      return { text: lines.join('\n'), request };
     });
   }
 

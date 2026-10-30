@@ -510,6 +510,51 @@ tmux attach -t cc-xangi-issue14
   - フックを付ける前の版で起動したセッションは、作業中として数えます
 - xangi を再起動したとき、セッションが残っていれば起動中のまま扱います。なければ終了にします
 
+### 作業を始められるかの判定（Jev）
+
+issue の内容だけで作業を始められるかを、Jev（TypeSafe System One）で判定できます。
+本文が空の issue で Claude Code を起動すると、何をするかを人に聞くところから始まるためです。
+判定は、Slack のメンションで確認のメッセージを出すときと、issue から Claude Code を起動する前の 2 か所で行います。
+
+```
+JEV_READINESS=shadow
+TYPESAFE_API_KEY=<TypeSafe の API キー>
+```
+
+| `JEV_READINESS` | 動き |
+|---|---|
+| `off`（既定） | 判定しません |
+| `shadow` | 判定をログに残すだけで、動きは変えません。判定を待たないので、応答の速さも変わりません |
+| `on` | 判定を待ち、作業を始めにくいと判定したら次のように動きます |
+
+`on` で作業を始めにくいと判定したときの動きです。
+
+- Slack のメンション: 確認のメッセージに、足りないもの（目的・対象・完了の条件・再現の手順のどれか）を書き足します
+  - 「作る」「やめる」のボタンは残します。足りないまま立てるかは人が決めます
+- issue からの起動: Claude Code を起動せず、足りないものを issue にコメントし、通知します
+  - タイトルか本文を書き足すと、次の確認で判定し直します
+  - 書き足すまでは、`events.json` に `needs_info` として残ります
+
+判定は、作業を始められる確率が 0.5 未満のときに「始めにくい」とします。
+キー未設定・タイムアウト（800ms）・API エラーのときは、作業を始められるとみなして、これまでどおりに動きます。
+
+判定は `DATA_DIR/logs/jev-readiness.jsonl` に 1 回 1 行で残ります。
+
+| フィールド | 内容 |
+|---|---|
+| `mode` / `source` | モードと、呼び出し元（`slack` / `github`） |
+| `repo` / `id` | リポジトリと、issue の番号（Slack ならチャンネルとメッセージの ts） |
+| `title` / `body` / `body_length` | タイトル、本文の先頭 200 文字、本文の長さ |
+| `ready` / `not_ready` | 作業を始められる確率と、始めにくいと判定したか |
+| `missing` / `missing_probabilities` | いちばん足りないものと、選択肢ごとの確率 |
+| `latency_ms` / `error` / `jev_model` | Jev の応答時間、失敗したときの理由、応答した Jev のバージョン |
+
+始めにくいと判定した issue は、たとえば次のように洗い出せます。
+
+```
+jq -c 'select(.not_ready) | {id, title, ready, missing}' jev-readiness.jsonl
+```
+
 ### 注意
 
 - `agent` ラベルを付けられるのは、リポジトリの triage 以上の権限を持つ人だけです
@@ -1057,6 +1102,7 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `EVENT_CLAUDE_PATH` | イベントから起動する `claude` のパス | PATH から探す |
 | `EVENT_CLAUDE_SKIP_PERMISSIONS` | `false`（`0` / `no` / `off`）にすると、イベントから起動する `claude` に `--dangerously-skip-permissions` を付けない | 付ける |
 | `EVENT_WAKE_CHANNEL_ID` | 投稿を合図に、ウォッチリストの issue をすぐ確認する Slack チャンネル | - |
+| `JEV_READINESS` | issue の内容で作業を始められるかの Jev の判定（`off` / `shadow` / `on`）。「作業を始められるかの判定（Jev）」を参照 | `off` |
 
 ### GitHub App認証（オプション）
 

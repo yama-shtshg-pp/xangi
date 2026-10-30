@@ -28,7 +28,10 @@ export interface AgentEvent {
   notifyChannelId?: string;
 }
 
-export type EventStatus = 'queued' | 'running' | 'done' | 'failed' | 'interrupted';
+/**
+ * needs_info: 内容が足りず起動しなかった。タイトルか本文が変わったら、キューに積み直す
+ */
+export type EventStatus = 'queued' | 'running' | 'done' | 'failed' | 'interrupted' | 'needs_info';
 
 export interface EventRecord {
   event: AgentEvent;
@@ -87,6 +90,19 @@ export class EventStore {
     const now = new Date().toISOString();
     this.records.set(this.key(event), { event, status: 'queued', receivedAt: now, updatedAt: now });
     this.save();
+    return true;
+  }
+
+  /**
+   * 内容が足りず起動しなかったイベントのタイトルか本文が変わっていたら、新しい内容でキューに積み直す
+   * 積み直したら true
+   */
+  requeueIfUpdated(event: AgentEvent): boolean {
+    const record = this.records.get(this.key(event));
+    if (!record || record.status !== 'needs_info') return false;
+    if (record.event.title === event.title && record.event.body === event.body) return false;
+    record.event = event;
+    this.setStatus(event, 'queued');
     return true;
   }
 

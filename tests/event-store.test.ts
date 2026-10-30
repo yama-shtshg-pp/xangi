@@ -104,6 +104,29 @@ describe('EventStore', () => {
     expect(reloaded.nextQueued()).toBeUndefined();
   });
 
+  it('needs_info のイベントは、タイトルか本文が変わったときだけ新しい内容でキューに積み直す', () => {
+    const store = new EventStore(path);
+    const event = makeEvent('o/r#1');
+    store.enqueue(event);
+    store.setStatus(event, 'needs_info', 'not ready');
+    expect(store.requeueIfUpdated(event)).toBe(false);
+
+    const updated = { ...event, body: 'more' };
+    expect(store.requeueIfUpdated(updated)).toBe(true);
+    const reloaded = new EventStore(path);
+    expect(reloaded.nextQueued()?.event.body).toBe('more');
+    expect(reloaded.nextQueued()?.error).toBeUndefined();
+  });
+
+  it('needs_info 以外のイベントは、内容が変わっても積み直さない', () => {
+    const store = new EventStore(path);
+    const event = makeEvent('o/r#1');
+    store.enqueue(event);
+    store.setStatus(event, 'done');
+    expect(store.requeueIfUpdated({ ...event, body: 'more' })).toBe(false);
+    expect(store.requeueIfUpdated(makeEvent('o/r#2'))).toBe(false);
+  });
+
   it('壊れたファイルは空から始めずに例外を投げ、ファイルには触らない', () => {
     writeFileSync(path, '{broken');
     expect(() => new EventStore(path)).toThrow(/Failed to read/);
