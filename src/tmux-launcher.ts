@@ -71,6 +71,27 @@ export function buildActivityHookSettings(statePath: string): string {
   return JSON.stringify(settings);
 }
 
+/** ツールの実行前に危ない操作かを判定させるフック（http）。tool-risk-server が受ける */
+function toolRiskHook(url: string) {
+  return { matcher: 'Bash|Write|Edit', hooks: [{ type: 'http', url, timeout: 10 }] };
+}
+
+/**
+ * `claude --settings` に渡す JSON。付けるフックがなければ undefined
+ * @param statePath 作業中か入力待ちかを書くファイル
+ * @param toolRiskUrl 危ない操作かを判定させる受け口の URL
+ */
+export function buildSessionSettings(statePath?: string, toolRiskUrl?: string): string | undefined {
+  if (!statePath && !toolRiskUrl) return undefined;
+  const settings = statePath
+    ? (JSON.parse(buildActivityHookSettings(statePath)) as { hooks: Record<string, unknown[]> })
+    : { hooks: {} as Record<string, unknown[]> };
+  if (toolRiskUrl) {
+    settings.hooks.PreToolUse = [...(settings.hooks.PreToolUse ?? []), toolRiskHook(toolRiskUrl)];
+  }
+  return JSON.stringify(settings);
+}
+
 /** tmux のセッション名に使えない文字（`.` と `:` など）を `-` に置き換える */
 function sanitize(text: string): string {
   return text
@@ -129,6 +150,8 @@ export interface TmuxLauncherOptions {
   startupCheckMs?: number;
   /** 作業中か入力待ちかを書かせるディレクトリ。未指定ならフックを付けない */
   stateDir?: string;
+  /** セッション名から、危ない操作かを判定させる受け口の URL を作る。未指定ならフックを付けない */
+  toolRiskHookUrl?: (name: string) => string;
   exec?: ExecFileFn;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -192,14 +215,14 @@ export class TmuxLauncher {
   async launch(name: string, prompt: string, cwd: string = this.options.cwd): Promise<boolean> {
     if (await this.hasSession(name)) return false;
     const statePath = this.statePath(name);
-    const hookArgs: string[] = [];
     if (statePath) {
       mkdirSync(this.options.stateDir!, { recursive: true });
       // 最初のプロンプトを処理している間を作業中にする。前に同じ名前で起動したときの状態も上書きする
       // （unknown はフックのない旧セッションだけになる）
       writeFileSync(statePath, 'busy');
-      hookArgs.push('--settings', buildActivityHookSettings(statePath));
     }
+    const settings = buildSessionSettings(statePath, this.options.toolRiskHookUrl?.(name));
+    const hookArgs = settings ? ['--settings', settings] : [];
     await this.run([
       'new-session',
       '-d',

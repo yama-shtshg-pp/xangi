@@ -57,6 +57,8 @@ import { startWebChat } from './web-chat.js';
 import { EventStore } from './event-store.js';
 import { defaultGhExec, GitHubIssueSource, type RepoTarget } from './event-source-github.js';
 import { getJevReadinessMode, IssueReadinessChecker } from './issue-readiness.js';
+import { getJevToolRiskMode, ToolRiskChecker } from './tool-risk.js';
+import { getToolRiskPort, startToolRiskServer, toolRiskHookUrl } from './tool-risk-server.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { SlackIssueCreator, SlackIssueStore } from './slack-issue.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
@@ -1253,6 +1255,12 @@ async function main() {
   });
   let eventLauncher: TmuxLauncher | undefined;
   let eventClaudePath: string | undefined;
+  // issue のセッションのツール実行前に、危ない操作かを判定する（off ならフックを付けない）
+  const toolRisk = new ToolRiskChecker({
+    mode: getJevToolRiskMode(),
+    logPath: join(dataDir, 'logs', 'jev-tool-risk.jsonl'),
+  });
+  const toolRiskPort = getToolRiskPort();
   if (eventConfig.enabled) {
     const claudePath = resolveCommandPath(eventConfig.claudePath ?? 'claude');
     const tmuxPath = resolveCommandPath('tmux');
@@ -1273,6 +1281,9 @@ async function main() {
         sessionPath: { ...safeEnv, ...getGitHubEnv(safeEnv) }.PATH,
         // フックは Claude Code の作業ディレクトリで動くので、DATA_DIR が相対パスでも絶対パスで渡す
         stateDir: resolve(dataDir, 'event-sessions'),
+        ...(toolRisk.mode !== 'off'
+          ? { toolRiskHookUrl: (name: string) => toolRiskHookUrl(toolRiskPort, name) }
+          : {}),
       });
       console.log(
         `[xangi] Events launch ${claudePath} in tmux (cwd: ${workdir}, skip permissions: ${eventConfig.claudeSkipPermissions})`
@@ -1325,6 +1336,27 @@ async function main() {
     }
 
     if (eventStore) {
+      const store = eventStore;
+      if (toolRisk.mode !== 'off') {
+        startToolRiskServer({
+          checker: toolRisk,
+          port: toolRiskPort,
+          resolveSession: (session) => {
+            const record = store.listByStatus('running').find((r) => r.sessionName === session);
+            return record ? { id: record.event.id, title: record.event.title } : undefined;
+          },
+          onAsk: async (session, verdict, target) => {
+            const record = store.listByStatus('running').find((r) => r.sessionName === session);
+            await notifyEvent(
+              `✋ 承認待ち: ${record?.event.id ?? session} ${record?.event.title ?? ''}\n` +
+                `${verdict.reasons.join('、')}\n\`${target.slice(0, 100)}\`\n` +
+                `tmux attach -t ${session} か Remote Control で答えてください`,
+              record?.event.notifyChannelId
+            );
+          },
+        });
+        console.log(`[xangi] Jev tool risk check: ${toolRisk.mode} (port ${toolRiskPort})`);
+      }
       eventDispatcher = new EventDispatcher({
         sources: [new GitHubIssueSource(listTargets)],
         store: eventStore,

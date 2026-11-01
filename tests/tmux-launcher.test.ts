@@ -6,6 +6,7 @@ import { join } from 'path';
 import {
   TmuxLauncher,
   buildActivityHookSettings,
+  buildSessionSettings,
   resolveCommandPath,
   toSessionName,
 } from '../src/tmux-launcher.js';
@@ -304,5 +305,42 @@ describe('TmuxLauncher の状態の記録', () => {
     await launcher.launch('cc-a-issue1', 'prompt');
     expect(exec.mock.calls[1][1]).not.toContain('--settings');
     expect(launcher.getActivity('cc-a-issue1')).toBe('unknown');
+  });
+});
+
+describe('危ない操作かを判定させるフック', () => {
+  const url = 'http://127.0.0.1:18190/hooks/tool-risk?session=cc-a-issue1';
+
+  it('buildSessionSettings は、作業中・入力待ちのフックに PreToolUse の http フックを足す', () => {
+    const settings = JSON.parse(buildSessionSettings('/state/cc-a-issue1', url)!);
+    const preToolUse = settings.hooks.PreToolUse as { matcher?: string; hooks: unknown[] }[];
+    expect(preToolUse).toHaveLength(2);
+    expect(preToolUse[1]).toEqual({
+      matcher: 'Bash|Write|Edit',
+      hooks: [{ type: 'http', url, timeout: 10 }],
+    });
+    expect(settings.hooks.Stop).toBeDefined();
+  });
+
+  it('buildSessionSettings は、どちらもなければ undefined、URL だけなら http フックだけ', () => {
+    expect(buildSessionSettings()).toBeUndefined();
+    expect(buildSessionSettings('/state/x')).toBe(buildActivityHookSettings('/state/x'));
+    const settings = JSON.parse(buildSessionSettings(undefined, url)!);
+    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse']);
+  });
+
+  it('toolRiskHookUrl があれば、セッション名の URL で --settings にフックを付けて起動する', async () => {
+    const exec = vi.fn().mockRejectedValueOnce(noSession()).mockResolvedValue(ok);
+    const launcher = new TmuxLauncher({
+      tmuxPath: '/opt/homebrew/bin/tmux',
+      claudePath: '/Users/me/.local/bin/claude',
+      cwd: '/workspace',
+      toolRiskHookUrl: (name) => `http://127.0.0.1:18190/hooks/tool-risk?session=${name}`,
+      exec,
+      sleep: async () => {},
+    });
+    await launcher.launch('cc-a-issue1', 'prompt');
+    const args = exec.mock.calls[1][1] as string[];
+    expect(args[args.indexOf('--settings') + 1]).toBe(buildSessionSettings(undefined, url));
   });
 });

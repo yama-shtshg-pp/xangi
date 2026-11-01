@@ -522,6 +522,8 @@ TYPESAFE_API_KEY=<TypeSafe の API キー>
 ```
 
 | `JEV_READINESS` | 動き |
+| `JEV_TOOL_RISK` | issue から起動した Claude Code のツール実行前のリスク判定（`off` / `shadow` / `on`）。「ツール実行前のリスク判定（Jev）」を参照 | `off` |
+| `EVENT_TOOL_RISK_PORT` | リスク判定のフックを受けるポート | `18190` |
 |---|---|
 | `off`（既定） | 判定しません |
 | `shadow` | 判定をログに残すだけで、動きは変えません。判定を待たないので、応答の速さも変わりません |
@@ -553,6 +555,50 @@ TYPESAFE_API_KEY=<TypeSafe の API キー>
 
 ```
 jq -c 'select(.not_ready) | {id, title, ready, missing}' jev-readiness.jsonl
+```
+
+### ツール実行前のリスク判定（Jev）
+
+issue から起動した Claude Code は `--dangerously-skip-permissions` 付きで動くので、危ない操作も確認なしで実行されます。
+ツールを実行する前に危ない操作かを判定し、危なければセッションの中で人に確かめさせることができます。
+
+```
+JEV_TOOL_RISK=shadow
+TYPESAFE_API_KEY=<TypeSafe の API キー>
+```
+
+- `off` 以外にすると、xangi が `127.0.0.1:${EVENT_TOOL_RISK_PORT}`（既定は `18190`）で待ち受けます
+  - issue から起動する claude に、Bash・Write・Edit の前にここを呼ぶ PreToolUse フックを付けます
+  - ほかの xangi と同じマシンで動かすときは、ポートが重ならないようにしてください
+- 判定は次の順に行います
+  - 承認のパターン（`src/approval-patterns.json` と機密ファイル）に一致したら、Jev に聞かずに危ないとします
+  - 一致しないときだけ、Jev に「破壊的な操作か」「本番や外部のサービスに触れるか」を聞きます。どちらかが 0.5 以上なら危ないとします
+
+| `JEV_TOOL_RISK` | 動き |
+|---|---|
+| `off`（既定） | フックを付けません |
+| `shadow` | 判定をログに残すだけで、すべて許可します。判定を待たないので、作業も遅くなりません |
+| `on` | 危ないと判定したら、セッションに確認（Yes / No）を出し、通知先にも承認待ちを知らせます |
+
+- `on` の確認には、`tmux attach` か Remote Control で答えます
+- Jev の判定だけで実行を許すことはしません。Jev が失敗したときは、パターンの判定だけで決めます
+- xangi が止まっていてフックが届かないときは、Claude Code はそのまま実行します
+- フックはセッションを起動するときに付けます。`JEV_TOOL_RISK` を変えても、すでに動いているセッションには効きません
+
+判定は `DATA_DIR/logs/jev-tool-risk.jsonl` に 1 回 1 行で残ります。
+コマンドには秘密が含まれることがあるので、先頭の 100 文字だけを残します。
+
+| フィールド | 内容 |
+|---|---|
+| `mode` / `session` / `issue` | モード、tmux のセッション名、issue |
+| `tool` / `target` / `target_length` | ツール名、コマンドかファイルのパスの先頭、その長さ |
+| `pattern` | 一致した承認のパターン（なければ `null`） |
+| `destructive` / `external` | 破壊的な操作である確率、本番や外部に触れる確率 |
+| `risky` | 危ないと判定したか |
+| `latency_ms` / `error` / `jev_model` | Jev の応答時間、失敗したときの理由、応答した Jev のバージョン |
+
+```
+jq -c 'select(.risky) | {issue, tool, target, pattern, destructive, external}' jev-tool-risk.jsonl
 ```
 
 ### 注意

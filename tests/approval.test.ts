@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import {
   detectDangerousCommand,
   detectDangerousTool,
+  matchDangerousTool,
   setApprovalEnabled,
 } from '../src/approval.js';
 
@@ -93,5 +94,23 @@ describe('approval', () => {
       const result = detectDangerousTool('Read', { file_path: '/home/user/.env' });
       expect(result).toBeNull();
     });
+  });
+});
+
+describe('matchDangerousTool', () => {
+  it('承認が無効でも、パターンに一致すれば返す', () => {
+    setApprovalEnabled(false);
+    try {
+      expect(detectDangerousTool('Bash', { command: 'rm -rf dist' })).toBeNull();
+      expect(matchDangerousTool('Bash', { command: 'rm -rf dist' })?.matches).toContain(
+        '再帰的ファイル削除'
+      );
+      expect(matchDangerousTool('Edit', { file_path: '/app/.env' })?.matches).toEqual([
+        '機密ファイルの変更',
+      ]);
+      expect(matchDangerousTool('Bash', { command: 'ls' })).toBeNull();
+    } finally {
+      setApprovalEnabled(true);
+    }
   });
 });
