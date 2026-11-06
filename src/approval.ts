@@ -87,6 +87,14 @@ export interface DangerousCommand {
  */
 export function detectDangerousCommand(input: string): DangerousCommand | null {
   if (!approvalEnabled) return null;
+  return matchDangerousCommand(input);
+}
+
+/**
+ * パターンに一致するかだけを見る（APPROVAL_ENABLED に関係なく判定する）
+ * issue から起動したセッションのリスク判定（tool-risk.ts）でも使う
+ */
+export function matchDangerousCommand(input: string): DangerousCommand | null {
   const lower = input.toLowerCase();
   const matches: string[] = [];
   for (const { command: cmd, description } of activePatterns) {
@@ -105,8 +113,16 @@ export function detectDangerousTool(
   toolInput: Record<string, unknown>
 ): DangerousCommand | null {
   if (!approvalEnabled) return null;
+  return matchDangerousTool(toolName, toolInput);
+}
+
+/** ツール呼び出しがパターンに一致するかだけを見る（APPROVAL_ENABLED に関係なく判定する） */
+export function matchDangerousTool(
+  toolName: string,
+  toolInput: Record<string, unknown>
+): DangerousCommand | null {
   if (toolName === 'Bash' && toolInput.command) {
-    return detectDangerousCommand(String(toolInput.command));
+    return matchDangerousCommand(String(toolInput.command));
   }
   if ((toolName === 'Write' || toolName === 'Edit') && toolInput.file_path) {
     const filePath = String(toolInput.file_path);
