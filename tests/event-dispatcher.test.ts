@@ -299,6 +299,58 @@ describe('EventDispatcher', () => {
     }
   });
 
+  describe('本文の起動日時', () => {
+    const withRunAt = (n: number, value: string): AgentEvent => ({
+      ...makeEvent(n),
+      body: `本文\nxangi-run-at: ${value}`,
+    });
+
+    it('日時より前は積まず、過ぎた最初のポーリングで起動する', async () => {
+      events = [withRunAt(1, '2026-11-20')];
+      let now = new Date('2026-11-19T23:59:00Z'); // JST 08:59
+      const dispatcher = makeDispatcher({ now: () => now });
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(store.has(events[0])).toBe(false);
+
+      now = new Date('2026-11-20T00:00:00Z'); // JST 09:00
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('指定のない issue はすぐ起動し、日時より前の issue は後続を待たせない', async () => {
+      events = [withRunAt(1, '2026-12-01'), makeEvent(2)];
+      await makeDispatcher({ now: () => new Date('2026-11-08T00:00:00Z') }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][1].id).toBe('o/a#2');
+    });
+
+    it('読めない値なら起動せず、同じ値の警告は 1 回だけ出す', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      events = [withRunAt(1, '2026/11/20')];
+      const dispatcher = makeDispatcher();
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      events = [withRunAt(1, '2026-11-01')];
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('起動したあとに日付を書き換えても起動し直さない', async () => {
+      events = [makeEvent(1)];
+      let now = new Date('2026-11-08T00:00:00Z');
+      const dispatcher = makeDispatcher({ now: () => now, maxConcurrent: 5 });
+      await dispatcher.poll();
+      events = [withRunAt(1, '2026-11-10')];
+      now = new Date('2026-11-11T00:00:00Z');
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('作業を始められるかの判定', () => {
     it('始められないと判定したら起動せず、needs_info にして issue にコメントし、通知する', async () => {
       events = [makeEvent(1)];

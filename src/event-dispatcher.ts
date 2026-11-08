@@ -18,6 +18,7 @@ import { cpus, loadavg } from 'os';
 import type { EventSource } from './event-source-github.js';
 import type { AgentEvent, EventRecord, EventStore } from './event-store.js';
 import type { ReadinessVerdict } from './issue-readiness.js';
+import { parseRunAt } from './run-at.js';
 import type { SessionActivity } from './tmux-launcher.js';
 
 export interface EventConfig {
@@ -175,6 +176,8 @@ export interface EventDispatcherOptions {
   comment?: (event: AgentEvent, message: string) => Promise<void>;
   /** 合図を受けてからポーリングするまで待つ時間。この間に来た合図は 1 回のポーリングにまとめる */
   wakeDelayMs?: number;
+  /** 本文の起動日時と比べる現在時刻（テストで差し替える） */
+  now?: () => Date;
 }
 
 /** GitHub アプリは 1 つの操作で複数の投稿をすることがあるので、少し待ってまとめる */
@@ -196,6 +199,8 @@ export class EventDispatcher {
   private wakePending = false;
   /** stop したあとは、合図や進行中のポーリングから次のポーリングを始めない */
   private stopped = false;
+  /** 起動日時を読めないと警告済みの issue と値（同じ値で毎回ログを出さない） */
+  private invalidRunAtWarned = new Map<string, string>();
 
   constructor(private options: EventDispatcherOptions) {}
 
@@ -255,6 +260,7 @@ export class EventDispatcher {
           continue;
         }
         for (const event of events) {
+          if (!this.isRunAtReached(event)) continue;
           if (this.options.store.enqueue(event)) {
             console.log(`[event-dispatcher] Queued ${event.source}:${event.id}`);
           } else if (this.options.store.requeueIfUpdated(event)) {
@@ -270,6 +276,28 @@ export class EventDispatcher {
         this.poll().catch((err) => logError('poll', err));
       }
     }
+  }
+
+  /**
+   * 本文の起動日時を過ぎたか（指定がなければ true）
+   * 過ぎていないイベントは記録しない。記録すると、当日のポーリングで積み済みとみなされて起動しなくなる
+   * 読めない値は書き間違いとみなし、予定より早く起動しないよう起動しない
+   */
+  private isRunAtReached(event: AgentEvent): boolean {
+    const runAt = parseRunAt(event.body);
+    const key = `${event.source}:${event.id}`;
+    if (runAt.kind === 'invalid') {
+      if (this.invalidRunAtWarned.get(key) !== runAt.value) {
+        this.invalidRunAtWarned.set(key, runAt.value);
+        console.warn(
+          `[event-dispatcher] Invalid xangi-run-at "${runAt.value}" in ${key}. Not launching (use YYYY-MM-DD or YYYY-MM-DDTHH:MM in JST)`
+        );
+      }
+      return false;
+    }
+    this.invalidRunAtWarned.delete(key);
+    if (runAt.kind === 'none') return true;
+    return runAt.at.getTime() <= (this.options.now?.() ?? new Date()).getTime();
   }
 
   /** 起動中のイベントのセッションがなくなっていたら終了にする */
