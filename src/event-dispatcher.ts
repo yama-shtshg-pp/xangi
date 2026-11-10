@@ -39,6 +39,8 @@ export interface EventConfig {
   claudeSkipPermissions: boolean;
   /** 投稿があったらすぐポーリングする Slack チャンネル（合図のチャンネル） */
   wakeChannelId?: string;
+  /** 起動日を待っている issue の一覧を毎週送る Slack チャンネル */
+  runAtDigestChannelId?: string;
 }
 
 /**
@@ -94,6 +96,7 @@ export function loadEventConfig(
     claudePath: env.EVENT_CLAUDE_PATH?.trim() || undefined,
     claudeSkipPermissions: parseSkipPermissions(env.EVENT_CLAUDE_SKIP_PERMISSIONS),
     wakeChannelId: env.EVENT_WAKE_CHANNEL_ID?.trim() || undefined,
+    runAtDigestChannelId: env.EVENT_RUN_AT_DIGEST_CHANNEL_ID?.trim() || undefined,
   };
 }
 

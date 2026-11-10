@@ -60,6 +60,7 @@ import { getJevReadinessMode, IssueReadinessChecker } from './issue-readiness.js
 import { getJevToolRiskMode, ToolRiskChecker } from './tool-risk.js';
 import { getToolRiskPort, startToolRiskServer, toolRiskHookUrl } from './tool-risk-server.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
+import { startRunAtDigest } from './run-at-digest.js';
 import { SlackIssueCreator, SlackIssueStore } from './slack-issue.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
 import { createClaudeTitleSummarizer } from './title-summarizer.js';
@@ -1205,6 +1206,7 @@ async function main() {
   const eventConfig = loadEventConfig(process.env, existsSync(watchListPath));
   // Slack は EventDispatcher より先に起動するので、合図は作ったあとの dispatcher に渡す
   let eventDispatcher: EventDispatcher | undefined;
+  let runAtDigest: { stop: () => void } | undefined;
   // dispatcher を作る前に来た合図。作ったあとに 1 回ポーリングする
   let wakeBeforeDispatcher = false;
   // メンションから issue を立てる処理。dispatcher を作れたときだけ用意する
@@ -1313,6 +1315,21 @@ async function main() {
       }
       return eventConfig.githubRepos.map((repo) => ({ repo, label: eventConfig.githubLabel }));
     };
+
+    // 起動日を待っている issue の一覧を毎週 Slack に送る
+    if (eventConfig.runAtDigestChannelId && config.slack.enabled) {
+      const channelId = eventConfig.runAtDigestChannelId;
+      runAtDigest = startRunAtDigest({
+        sources: [new GitHubIssueSource(listTargets)],
+        send: async (message) => {
+          // Slack の送信関数は Slack の起動後に登録されるので、送るときに取り出す
+          const send = scheduler.getSender('slack');
+          if (!send) throw new Error('Slack sender is not registered');
+          await send(channelId, message);
+        },
+      });
+      console.log(`[xangi] xangi-run-at digest: every Monday 09:00 JST → ${channelId}`);
+    }
 
     let eventStore: EventStore | undefined;
     try {
@@ -1428,11 +1445,18 @@ async function main() {
     );
   }
 
+  if (eventConfig.runAtDigestChannelId && !runAtDigest) {
+    console.warn(
+      '[xangi] EVENT_RUN_AT_DIGEST_CHANNEL_ID is set but Slack or event polling is disabled. Not sending the digest.'
+    );
+  }
+
   // シャットダウン時にスケジューラを停止
   const shutdown = () => {
     console.log('[xangi] Shutting down scheduler...');
     scheduler.stopAll();
     eventDispatcher?.stop();
+    runAtDigest?.stop();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
