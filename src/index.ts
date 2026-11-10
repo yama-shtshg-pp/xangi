@@ -1316,21 +1316,6 @@ async function main() {
       return eventConfig.githubRepos.map((repo) => ({ repo, label: eventConfig.githubLabel }));
     };
 
-    // 起動日を待っている issue の一覧を毎週 Slack に送る
-    if (eventConfig.runAtDigestChannelId && config.slack.enabled) {
-      const channelId = eventConfig.runAtDigestChannelId;
-      runAtDigest = startRunAtDigest({
-        sources: [new GitHubIssueSource(listTargets)],
-        send: async (message) => {
-          // Slack の送信関数は Slack の起動後に登録されるので、送るときに取り出す
-          const send = scheduler.getSender('slack');
-          if (!send) throw new Error('Slack sender is not registered');
-          await send(channelId, message);
-        },
-      });
-      console.log(`[xangi] xangi-run-at digest: every Monday 09:00 JST → ${channelId}`);
-    }
-
     let eventStore: EventStore | undefined;
     try {
       eventStore = new EventStore(join(dataDir, 'events.json'));
@@ -1411,6 +1396,19 @@ async function main() {
           : `[xangi] Event polling started: ${eventConfig.githubRepos.join(', ')} (label: ${eventConfig.githubLabel})`
       );
       if (wakeBeforeDispatcher) eventDispatcher.wake();
+
+      // 起動日を待っている issue の一覧を毎週 Slack に送る
+      // イベントから起動できないときに送ると、起動しない issue を待っていると伝えてしまうので、dispatcher を作ってから始める
+      const sendSlack = scheduler.getSender('slack');
+      if (eventConfig.runAtDigestChannelId && sendSlack) {
+        const channelId = eventConfig.runAtDigestChannelId;
+        const digestSource = new GitHubIssueSource(listTargets);
+        runAtDigest = startRunAtDigest({
+          fetch: () => digestSource.pollWithFailures(),
+          send: (message) => sendSlack(channelId, message),
+        });
+        console.log(`[xangi] xangi-run-at digest: every Monday 09:00 JST → ${channelId}`);
+      }
 
       if (config.slack.enabled) {
         const dispatcher = eventDispatcher;

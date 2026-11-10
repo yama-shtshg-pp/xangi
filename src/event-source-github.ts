@@ -72,17 +72,27 @@ export class GitHubIssueSource implements EventSource {
    * @throws 対象の一覧を取れないとき
    */
   async poll(): Promise<AgentEvent[]> {
+    return (await this.pollWithFailures()).events;
+  }
+
+  /**
+   * poll と同じ。issue を取れなかったリポジトリも返す（取れなかったことと 0 件を見分けるため）
+   * @throws 対象の一覧を取れないとき
+   */
+  async pollWithFailures(): Promise<{ events: AgentEvent[]; failedRepos: string[] }> {
     const events: AgentEvent[] = [];
+    const failedRepos: string[] = [];
     for (const target of await this.targets()) {
       try {
         events.push(...(await this.pollRepo(target)));
       } catch (err) {
+        failedRepos.push(target.repo);
         console.error(
           `[event-source-github] Failed to list issues of ${target.repo}: ${err instanceof Error ? err.message : String(err)}`
         );
       }
     }
-    return events;
+    return { events, failedRepos };
   }
 
   private async pollRepo(target: RepoTarget): Promise<AgentEvent[]> {

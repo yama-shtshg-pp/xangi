@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { EventSource } from '../src/event-source-github.js';
 import type { AgentEvent } from '../src/event-store.js';
 import { buildRunAtDigest, formatJst, sendRunAtDigest } from '../src/run-at-digest.js';
 
@@ -72,6 +71,15 @@ describe('buildRunAtDigest', () => {
     );
   });
 
+  it('値が空か、バッククォートしかないときは「値が空」と書く', () => {
+    const message = buildRunAtDigest(
+      [issue(1, 'xangi-run-at:'), issue(2, 'xangi-run-at: ``')],
+      NOW
+    );
+    expect(message).toContain('o/r#1> issue 1（値が空）');
+    expect(message).toContain('o/r#2> issue 2（値が空）');
+  });
+
   it('読めない issue だけでも送る', () => {
     expect(buildRunAtDigest([issue(1, 'xangi-run-at: 来週')], NOW)).toContain(
       '*起動日を読めず、起動しない issue（1 件）*'
@@ -92,18 +100,17 @@ describe('buildRunAtDigest', () => {
 });
 
 describe('sendRunAtDigest', () => {
-  const source = (events: AgentEvent[] | Error, name = 'github-issue'): EventSource => ({
-    name,
-    poll: async () => {
-      if (events instanceof Error) throw events;
-      return events;
-    },
-  });
+  const fetched =
+    (events: AgentEvent[], failedRepos: string[] = []) =>
+    async () => ({
+      events,
+      failedRepos,
+    });
 
   it('一覧があれば送る', async () => {
     const send = vi.fn(async () => {});
     const sent = await sendRunAtDigest({
-      sources: [source([issue(1, 'xangi-run-at: 2026-11-20')])],
+      fetch: fetched([issue(1, 'xangi-run-at: 2026-11-20')]),
       send,
       now: () => NOW,
     });
@@ -115,7 +122,7 @@ describe('sendRunAtDigest', () => {
   it('一覧がなければ送らない', async () => {
     const send = vi.fn(async () => {});
     const sent = await sendRunAtDigest({
-      sources: [source([issue(1, '本文')])],
+      fetch: fetched([issue(1, '本文')]),
       send,
       now: () => NOW,
     });
@@ -123,25 +130,38 @@ describe('sendRunAtDigest', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it('1 つの源が失敗しても、ほかの源の一覧は送る', async () => {
+  it('issue を取れなかったリポジトリがあれば、ほかが 0 件でも送る', async () => {
     const send = vi.fn(async () => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
     const sent = await sendRunAtDigest({
-      sources: [
-        source(new Error('boom'), 'broken'),
-        source([issue(1, 'xangi-run-at: 2026-11-20')]),
-      ],
+      fetch: fetched([], ['o/broken']),
       send,
       now: () => NOW,
     });
     expect(sent).toBe(true);
-    expect(send.mock.calls[0][0]).toContain('o/r#1');
+    expect(send.mock.calls[0][0]).toBe('*issue を取れなかったリポジトリ（1 件）*\n• o/broken');
+  });
+
+  it('対象の一覧を取れなければ、取れなかったことを送る', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const send = vi.fn(async () => {});
+    const sent = await sendRunAtDigest({
+      fetch: async () => {
+        throw new Error('watch-repos.json <broken>');
+      },
+      send,
+      now: () => NOW,
+    });
+    expect(sent).toBe(true);
+    expect(send.mock.calls[0][0]).toBe(
+      '*起動日を待っている issue の一覧を作れませんでした*\nwatch-repos.json &lt;broken&gt;'
+    );
+    error.mockRestore();
   });
 
   it('送れなければ投げる', async () => {
     await expect(
       sendRunAtDigest({
-        sources: [source([issue(1, 'xangi-run-at: 2026-11-20')])],
+        fetch: fetched([issue(1, 'xangi-run-at: 2026-11-20')]),
         send: async () => {
           throw new Error('slack down');
         },

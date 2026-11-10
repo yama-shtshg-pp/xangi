@@ -6,14 +6,11 @@
  * 一覧はポーリングの結果とは別に、送るときに issue を取り直して作る（積み済みかどうかに左右されない）。
  */
 import cron from 'node-cron';
-import type { EventSource } from './event-source-github.js';
 import type { AgentEvent } from './event-store.js';
-import { parseRunAt } from './run-at.js';
+import { JST_OFFSET_MS, parseRunAt } from './run-at.js';
 
 /** 毎週月曜の 09:00（JST） */
 export const RUN_AT_DIGEST_CRON = '0 9 * * 1';
-
-const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 /** `2026-11-20 09:00` の形にする（JST） */
 export function formatJst(date: Date): string {
@@ -30,10 +27,15 @@ function link(event: AgentEvent): string {
 }
 
 /**
- * 起動待ちと、日付を読めない issue の一覧を作る。両方なければ undefined（投稿しない）
+ * 起動待ちと、日付を読めない issue の一覧を作る。どれもなければ undefined（投稿しない）
  * 起動日時を過ぎた issue は、ポーリングで積まれるので載せない
+ * @param failedRepos issue を取れなかったリポジトリ。取れなかったことを 0 件と見分けられるよう載せる
  */
-export function buildRunAtDigest(events: AgentEvent[], now: Date): string | undefined {
+export function buildRunAtDigest(
+  events: AgentEvent[],
+  now: Date,
+  failedRepos: string[] = []
+): string | undefined {
   const waiting: { event: AgentEvent; at: Date }[] = [];
   const invalid: { event: AgentEvent; value: string }[] = [];
   for (const event of events) {
@@ -44,7 +46,7 @@ export function buildRunAtDigest(events: AgentEvent[], now: Date): string | unde
       invalid.push({ event, value: runAt.value });
     }
   }
-  if (waiting.length === 0 && invalid.length === 0) return undefined;
+  if (waiting.length === 0 && invalid.length === 0 && failedRepos.length === 0) return undefined;
 
   const lines: string[] = [];
   if (waiting.length > 0) {
@@ -61,17 +63,24 @@ export function buildRunAtDigest(events: AgentEvent[], now: Date): string | unde
       '`xangi-run-at: YYYY-MM-DD` か `YYYY-MM-DDTHH:MM` に直すと起動します'
     );
     for (const { event, value } of invalid) {
-      // 値にバッククォートがあるとコードの表示が切れるので外す
+      // 値にバッククォートがあるとコードの表示が切れるので外す。空なら空と書く
+      const shown = value.replace(/`/g, '');
       lines.push(
-        `• ${link(event)} ${escapeSlack(event.title)}（\`${escapeSlack(value.replace(/`/g, ''))}\`）`
+        `• ${link(event)} ${escapeSlack(event.title)}（${shown ? `\`${escapeSlack(shown)}\`` : '値が空'}）`
       );
     }
+  }
+  if (failedRepos.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push(`*issue を取れなかったリポジトリ（${failedRepos.length} 件）*`);
+    for (const repo of failedRepos) lines.push(`• ${escapeSlack(repo)}`);
   }
   return lines.join('\n');
 }
 
 export interface RunAtDigestOptions {
-  sources: EventSource[];
+  /** 対象の issue と、取れなかったリポジトリを返す。対象の一覧を取れなければ投げる */
+  fetch: () => Promise<{ events: AgentEvent[]; failedRepos: string[] }>;
   /** 一覧を送る。送れなければ投げる */
   send: (message: string) => Promise<void>;
   /** テストで差し替える */
@@ -80,21 +89,26 @@ export interface RunAtDigestOptions {
 
 /**
  * issue を取り直して一覧を送る。送るものがなければ送らない
- * イベント源の 1 つが失敗しても、ほかの源の一覧は送る
+ * 対象の一覧を取れないときは、取れなかったことを送る（黙ると 0 件と区別できない）
  * @returns 送ったら true
  */
 export async function sendRunAtDigest(options: RunAtDigestOptions): Promise<boolean> {
-  const events: AgentEvent[] = [];
-  for (const source of options.sources) {
-    try {
-      events.push(...(await source.poll()));
-    } catch (err) {
-      console.error(
-        `[run-at-digest] ${source.name} poll failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+  let fetched: { events: AgentEvent[]; failedRepos: string[] };
+  try {
+    fetched = await options.fetch();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[run-at-digest] Failed to list targets: ${reason}`);
+    await options.send(
+      `*起動日を待っている issue の一覧を作れませんでした*\n${escapeSlack(reason)}`
+    );
+    return true;
   }
-  const message = buildRunAtDigest(events, options.now?.() ?? new Date());
+  const message = buildRunAtDigest(
+    fetched.events,
+    options.now?.() ?? new Date(),
+    fetched.failedRepos
+  );
   if (!message) {
     console.log('[run-at-digest] No issues waiting for xangi-run-at');
     return false;

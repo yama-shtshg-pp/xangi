@@ -63,6 +63,21 @@ describe('GitHubIssueSource', () => {
     error.mockRestore();
   });
 
+  it('pollWithFailures は、issue を取れなかったリポジトリも返す', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const gh = vi.fn(async (args: string[]) => {
+      if (args[3] === 'o/broken') throw new Error('gh: not found');
+      return JSON.stringify(issues);
+    });
+    const source = new GitHubIssueSource(targets(['o/broken', 'o/a']), gh);
+
+    const { events, failedRepos } = await source.pollWithFailures();
+
+    expect(events.map((e) => e.id)).toEqual(['o/a#12']);
+    expect(failedRepos).toEqual(['o/broken']);
+    error.mockRestore();
+  });
+
   it('gh が新しい順に返しても、issue 番号の古い順に並べる', async () => {
     const gh = vi.fn().mockResolvedValue(
       JSON.stringify([
