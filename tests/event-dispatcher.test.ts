@@ -501,6 +501,7 @@ describe('loadEventConfig', () => {
       claudePath: undefined,
       claudeSkipPermissions: true,
       wakeChannelId: undefined,
+      runAtDigestChannelId: undefined,
     });
   });
 
@@ -517,6 +518,7 @@ describe('loadEventConfig', () => {
         EVENT_CLAUDE_PATH: '/opt/bin/claude',
         EVENT_CLAUDE_SKIP_PERMISSIONS: 'false',
         EVENT_WAKE_CHANNEL_ID: ' C123 ',
+        EVENT_RUN_AT_DIGEST_CHANNEL_ID: ' C456 ',
       })
     ).toEqual({
       enabled: true,
@@ -529,6 +531,7 @@ describe('loadEventConfig', () => {
       claudePath: '/opt/bin/claude',
       claudeSkipPermissions: false,
       wakeChannelId: 'C123',
+      runAtDigestChannelId: 'C456',
     });
   });
 

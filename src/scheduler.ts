@@ -76,6 +76,10 @@ export class Scheduler {
   registerSender(platform: Platform, sender: SendMessageFn): void {
     this.senders.set(platform, sender);
   }
+  /** 登録済みの送信関数を返す。未登録なら undefined */
+  getSender(platform: Platform): SendMessageFn | undefined {
+    return this.senders.get(platform);
+  }
   /**
    * プラットフォームのエージェント実行関数を登録
    */

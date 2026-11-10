@@ -12,7 +12,7 @@ const RUN_AT_VALUE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/;
 
 /** 日付だけ書いたときの起動時刻（JST） */
 const DEFAULT_HOUR = 9;
-const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+export const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 export type RunAt =
   | { kind: 'none' }
