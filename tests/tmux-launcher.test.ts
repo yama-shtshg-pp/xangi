@@ -343,4 +343,34 @@ describe('危ない操作かを判定させるフック', () => {
     const args = exec.mock.calls[1][1] as string[];
     expect(args[args.indexOf('--settings') + 1]).toBe(buildSessionSettings(undefined, url));
   });
+
+  it('buildSessionSettings は、loopWatchUrl があれば idle を書く Stop のフックに http フックを足す', () => {
+    const loopUrl = 'http://127.0.0.1:18190/hooks/loop-watch?session=cc-a-issue1';
+    const settings = JSON.parse(buildSessionSettings('/state/cc-a-issue1', url, loopUrl)!);
+    const stop = settings.hooks.Stop as { hooks: { type: string }[] }[];
+    expect(stop).toHaveLength(2);
+    expect(stop[0].hooks[0].type).toBe('command');
+    expect(stop[1]).toEqual({ hooks: [{ type: 'http', url: loopUrl, timeout: 10 }] });
+    // リスク判定が off でも、Stop の http フックだけを付けられる
+    const only = JSON.parse(buildSessionSettings(undefined, undefined, loopUrl)!);
+    expect(Object.keys(only.hooks)).toEqual(['Stop']);
+  });
+
+  it('loopWatchHookUrl があれば、セッション名の URL で Stop のフックを付けて起動する', async () => {
+    const exec = vi.fn().mockRejectedValueOnce(noSession()).mockResolvedValue(ok);
+    const loopUrl = (name: string) => `http://127.0.0.1:18190/hooks/loop-watch?session=${name}`;
+    const launcher = new TmuxLauncher({
+      tmuxPath: '/opt/homebrew/bin/tmux',
+      claudePath: '/Users/me/.local/bin/claude',
+      cwd: '/workspace',
+      loopWatchHookUrl: loopUrl,
+      exec,
+      sleep: async () => {},
+    });
+    await launcher.launch('cc-a-issue1', 'prompt');
+    const args = exec.mock.calls[1][1] as string[];
+    expect(args[args.indexOf('--settings') + 1]).toBe(
+      buildSessionSettings(undefined, undefined, loopUrl('cc-a-issue1'))
+    );
+  });
 });

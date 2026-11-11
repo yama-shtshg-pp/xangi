@@ -76,18 +76,31 @@ function toolRiskHook(url: string) {
   return { matcher: 'Bash|Write|Edit', hooks: [{ type: 'http', url, timeout: 10 }] };
 }
 
+/** 返答を終えるたびに作業の状態を判定させるフック（http）。tool-risk-server が受ける */
+function loopWatchHook(url: string) {
+  return { hooks: [{ type: 'http', url, timeout: 10 }] };
+}
+
 /**
  * `claude --settings` に渡す JSON。付けるフックがなければ undefined
  * @param statePath 作業中か入力待ちかを書くファイル
  * @param toolRiskUrl 危ない操作かを判定させる受け口の URL
+ * @param loopWatchUrl 返答を終えるたびに作業の状態を判定させる受け口の URL
  */
-export function buildSessionSettings(statePath?: string, toolRiskUrl?: string): string | undefined {
-  if (!statePath && !toolRiskUrl) return undefined;
+export function buildSessionSettings(
+  statePath?: string,
+  toolRiskUrl?: string,
+  loopWatchUrl?: string
+): string | undefined {
+  if (!statePath && !toolRiskUrl && !loopWatchUrl) return undefined;
   const settings = statePath
     ? (JSON.parse(buildActivityHookSettings(statePath)) as { hooks: Record<string, unknown[]> })
     : { hooks: {} as Record<string, unknown[]> };
   if (toolRiskUrl) {
     settings.hooks.PreToolUse = [...(settings.hooks.PreToolUse ?? []), toolRiskHook(toolRiskUrl)];
+  }
+  if (loopWatchUrl) {
+    settings.hooks.Stop = [...(settings.hooks.Stop ?? []), loopWatchHook(loopWatchUrl)];
   }
   return JSON.stringify(settings);
 }
@@ -152,6 +165,8 @@ export interface TmuxLauncherOptions {
   stateDir?: string;
   /** セッション名から、危ない操作かを判定させる受け口の URL を作る。未指定ならフックを付けない */
   toolRiskHookUrl?: (name: string) => string;
+  /** セッション名から、作業の状態を判定させる受け口の URL を作る。未指定ならフックを付けない */
+  loopWatchHookUrl?: (name: string) => string;
   exec?: ExecFileFn;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -221,7 +236,11 @@ export class TmuxLauncher {
       // （unknown はフックのない旧セッションだけになる）
       writeFileSync(statePath, 'busy');
     }
-    const settings = buildSessionSettings(statePath, this.options.toolRiskHookUrl?.(name));
+    const settings = buildSessionSettings(
+      statePath,
+      this.options.toolRiskHookUrl?.(name),
+      this.options.loopWatchHookUrl?.(name)
+    );
     const hookArgs = settings ? ['--settings', settings] : [];
     await this.run([
       'new-session',

@@ -58,7 +58,13 @@ import { EventStore } from './event-store.js';
 import { defaultGhExec, GitHubIssueSource, type RepoTarget } from './event-source-github.js';
 import { getJevReadinessMode, IssueReadinessChecker } from './issue-readiness.js';
 import { getJevToolRiskMode, ToolRiskChecker } from './tool-risk.js';
-import { getToolRiskPort, startToolRiskServer, toolRiskHookUrl } from './tool-risk-server.js';
+import {
+  getToolRiskPort,
+  loopWatchHookUrl,
+  startToolRiskServer,
+  toolRiskHookUrl,
+} from './tool-risk-server.js';
+import { getJevLoopWatchMode, LoopWatcher, type LoopWatchAlert } from './loop-watch.js';
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { startRunAtDigest } from './run-at-digest.js';
 import { SlackIssueCreator, SlackIssueStore } from './slack-issue.js';
@@ -1263,6 +1269,14 @@ async function main() {
     logPath: join(dataDir, 'logs', 'jev-tool-risk.jsonl'),
   });
   const toolRiskPort = getToolRiskPort();
+  // issue のセッションが返答を終えるたびに、詰まっていないかを判定する（off ならフックを付けない）
+  // 通知は on のときだけ。イベントの記録ができてから notify を差し込む
+  let notifyLoopWatch: ((alert: LoopWatchAlert) => Promise<void>) | undefined;
+  const loopWatch = new LoopWatcher({
+    mode: getJevLoopWatchMode(),
+    logPath: join(dataDir, 'logs', 'jev-loop-watch.jsonl'),
+    notify: async (alert) => notifyLoopWatch?.(alert),
+  });
   if (eventConfig.enabled) {
     const claudePath = resolveCommandPath(eventConfig.claudePath ?? 'claude');
     const tmuxPath = resolveCommandPath('tmux');
@@ -1285,6 +1299,9 @@ async function main() {
         stateDir: resolve(dataDir, 'event-sessions'),
         ...(toolRisk.mode !== 'off'
           ? { toolRiskHookUrl: (name: string) => toolRiskHookUrl(toolRiskPort, name) }
+          : {}),
+        ...(loopWatch.mode !== 'off'
+          ? { loopWatchHookUrl: (name: string) => loopWatchHookUrl(toolRiskPort, name) }
           : {}),
       });
       console.log(
@@ -1339,10 +1356,27 @@ async function main() {
 
     if (eventStore) {
       const store = eventStore;
-      if (toolRisk.mode !== 'off') {
+      // JEV_TOOL_RISK が off でも、JEV_LOOP_WATCH が off 以外ならサーバーを起動する
+      if (toolRisk.mode !== 'off' || loopWatch.mode !== 'off') {
+        notifyLoopWatch = async (alert) => {
+          const record = store.listByStatus('running').find((r) => r.sessionName === alert.session);
+          const heading =
+            alert.state === 'ask_human' ? '🙋 人の判断待ち' : '🌀 同じ所で詰まっているようです';
+          const quoted = alert.messageTail
+            .split('\n')
+            .map((line) => `> ${line}`)
+            .join('\n');
+          await notifyEvent(
+            `${heading}: ${alert.issueId ?? alert.session} ${alert.issueTitle ?? ''}\n` +
+              `${quoted}\n` +
+              `tmux attach -t ${alert.session} か Remote Control で続きを指示してください`,
+            record?.event.notifyChannelId
+          );
+        };
         startToolRiskServer({
           checker: toolRisk,
           port: toolRiskPort,
+          loopWatch: loopWatch.mode !== 'off' ? loopWatch : undefined,
           resolveSession: (session) => {
             const record = store.listByStatus('running').find((r) => r.sessionName === session);
             return record ? { id: record.event.id, title: record.event.title } : undefined;
@@ -1357,7 +1391,9 @@ async function main() {
             );
           },
         });
-        console.log(`[xangi] Jev tool risk check: ${toolRisk.mode} (port ${toolRiskPort})`);
+        console.log(
+          `[xangi] Jev tool risk check: ${toolRisk.mode}, loop watch: ${loopWatch.mode} (port ${toolRiskPort})`
+        );
       }
       eventDispatcher = new EventDispatcher({
         sources: [new GitHubIssueSource(listTargets)],
