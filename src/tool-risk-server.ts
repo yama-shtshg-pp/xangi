@@ -1,23 +1,34 @@
 /**
- * issue から起動した Claude Code の PreToolUse フック（http）の受け口
+ * issue から起動した Claude Code のフック（http）の受け口
  *
- * tmux-launcher が起動する claude に `POST /hooks/tool-risk?session=<セッション名>` を呼ばせる。
- * 危ないと判定したら permissionDecision: "ask" を返し、セッションの中で人に確かめさせる。
- * --dangerously-skip-permissions 付きでも、フックの ask では確認が出る。
+ * tmux-launcher が起動する claude に、次の 2 つを呼ばせる。
+ * - PreToolUse: `POST /hooks/tool-risk?session=<セッション名>`
+ *   危ないと判定したら permissionDecision: "ask" を返し、セッションの中で人に確かめさせる。
+ *   --dangerously-skip-permissions 付きでも、フックの ask では確認が出る。
+ * - Stop: `POST /hooks/loop-watch?session=<セッション名>`
+ *   判定を待たずに空の応答を返し、作業の状態の判定（loop-watch.ts）は裏で行う。
  *
  * Why: チャットの承認サーバー（approval-server.ts）は Discord が有効なときだけ起動し、
  * ポートもほかの xangi と分け合っている。issue のセッション用に、別のポートで待ち受ける。
  * 受け口が落ちていてもフックの失敗として扱われ、Claude Code の作業は止まらない。
  */
 import { createServer, type Server } from 'http';
+import type { IncomingMessage } from 'http';
+import type { LoopWatcher } from './loop-watch.js';
 import { toolTarget, type ToolRiskChecker, type ToolRiskVerdict } from './tool-risk.js';
 
 export const DEFAULT_TOOL_RISK_PORT = 18190;
 export const TOOL_RISK_PATH = '/hooks/tool-risk';
+export const LOOP_WATCH_PATH = '/hooks/loop-watch';
 
-/** フックの URL。tmux-launcher が --settings に入れる */
+/** PreToolUse のフックの URL。tmux-launcher が --settings に入れる */
 export function toolRiskHookUrl(port: number, session: string): string {
   return `http://127.0.0.1:${port}${TOOL_RISK_PATH}?session=${encodeURIComponent(session)}`;
+}
+
+/** Stop のフックの URL。tmux-launcher が --settings に入れる */
+export function loopWatchHookUrl(port: number, session: string): string {
+  return `http://127.0.0.1:${port}${LOOP_WATCH_PATH}?session=${encodeURIComponent(session)}`;
 }
 
 /** EVENT_TOOL_RISK_PORT を読む。不正な値なら既定のポート */
@@ -39,20 +50,36 @@ export function buildHookResponse(verdict: ToolRiskVerdict): string {
 }
 
 export interface ToolRiskServerOptions {
-  checker: ToolRiskChecker;
+  /** ツール実行前のリスク判定。未指定なら PreToolUse の受け口は 404 */
+  checker?: ToolRiskChecker;
   port: number;
   /** セッション名から issue を引く。分からなければ undefined */
   resolveSession?: (session: string) => { id: string; title: string } | undefined;
   /** ask を返したときに呼ぶ（人に承認を待っていることを知らせる）。失敗しても応答は返す */
   onAsk?: (session: string, verdict: ToolRiskVerdict, target: string) => Promise<void>;
+  /** 返答を終えるたびに作業の状態を判定する。未指定なら Stop の受け口は 404 */
+  loopWatch?: LoopWatcher;
 }
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) throw new Error('request body too large');
+    chunks.push(chunk as Buffer);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>;
+}
+
 export function startToolRiskServer(options: ToolRiskServerOptions): Server {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    if (url.pathname !== TOOL_RISK_PATH || req.method !== 'POST') {
+    const isToolRisk = url.pathname === TOOL_RISK_PATH && options.checker !== undefined;
+    const isLoopWatch = url.pathname === LOOP_WATCH_PATH && options.loopWatch !== undefined;
+    if ((!isToolRisk && !isLoopWatch) || req.method !== 'POST') {
       res.writeHead(404);
       res.end();
       return;
@@ -61,23 +88,37 @@ export function startToolRiskServer(options: ToolRiskServerOptions): Server {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(body);
     };
-    try {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      for await (const chunk of req) {
-        size += (chunk as Buffer).length;
-        if (size > MAX_BODY_BYTES) throw new Error('request body too large');
-        chunks.push(chunk as Buffer);
+    const session = url.searchParams.get('session') ?? '';
+    if (isLoopWatch) {
+      try {
+        const body = (await readJson(req)) as { last_assistant_message?: unknown };
+        // 判定を待たずに応答する（Stop のフックで decision: "block" は返さない）
+        reply('{}');
+        const issue = options.resolveSession?.(session);
+        void options.loopWatch!.handleStop({
+          session,
+          issueId: issue?.id,
+          issueTitle: issue?.title,
+          lastMessage:
+            typeof body.last_assistant_message === 'string'
+              ? body.last_assistant_message
+              : undefined,
+        });
+      } catch (err) {
+        console.error(`[loop-watch] ${err instanceof Error ? err.message : String(err)}`);
+        if (!res.headersSent) reply('{}');
       }
-      const body = JSON.parse(Buffer.concat(chunks).toString()) as {
+      return;
+    }
+    try {
+      const body = (await readJson(req)) as {
         tool_name?: string;
         tool_input?: Record<string, unknown>;
       };
-      const session = url.searchParams.get('session') ?? '';
       const issue = options.resolveSession?.(session);
       const toolName = body.tool_name ?? '';
       const toolInput = body.tool_input ?? {};
-      const verdict = await options.checker.check({
+      const verdict = await options.checker!.check({
         session,
         issueId: issue?.id,
         issueTitle: issue?.title,

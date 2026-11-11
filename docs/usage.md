@@ -561,8 +561,6 @@ TYPESAFE_API_KEY=<TypeSafe の API キー>
 ```
 
 | `JEV_READINESS` | 動き |
-| `JEV_TOOL_RISK` | issue から起動した Claude Code のツール実行前のリスク判定（`off` / `shadow` / `on`）。「ツール実行前のリスク判定（Jev）」を参照 | `off` |
-| `EVENT_TOOL_RISK_PORT` | リスク判定のフックを受けるポート | `18190` |
 |---|---|
 | `off`（既定） | 判定しません |
 | `shadow` | 判定をログに残すだけで、動きは変えません。判定を待たないので、応答の速さも変わりません |
@@ -638,6 +636,64 @@ TYPESAFE_API_KEY=<TypeSafe の API キー>
 
 ```
 jq -c 'select(.risky) | {issue, tool, target, pattern, destructive, external}' jev-tool-risk.jsonl
+```
+
+### 返答ごとの作業の状態の判定（Jev）
+
+issue から起動した Claude Code は、返答を終えると入力待ちになります。
+詰まったまま入力待ちになっても、そのままでは誰も気づきません。
+返答を終えるたびに作業の状態を Jev で判定し、人の判断が要りそうなときに通知先へ知らせることができます。
+
+```
+JEV_LOOP_WATCH=shadow
+TYPESAFE_API_KEY=<TypeSafe の API キー>
+```
+
+- `off` 以外にすると、issue から起動する claude に Stop の http フックを付けます
+  - 受け口は、リスク判定と同じ `127.0.0.1:${EVENT_TOOL_RISK_PORT}` の `/hooks/loop-watch` です
+  - `JEV_TOOL_RISK` が `off` でも、`JEV_LOOP_WATCH` が `off` 以外なら xangi はこのポートで待ち受けます
+- 判定には、issue のタイトル、直近の返答の末尾 2000 文字、そのセッションで何回目の返答か、前回の判定を渡します
+  - 前回の判定と回数は、xangi がセッションごとにメモリに覚えています。xangi を再起動すると 1 回目から数え直します
+- 状態は次の 4 つから選びます
+
+| 状態 | 意味 |
+|---|---|
+| `done` | issue の作業を終えたと報告している |
+| `continue` | 作業の途中で、人の判断がなくても先に進める |
+| `stuck` | 同じエラーや失敗を繰り返している、または手詰まりになっている |
+| `ask_human` | 人に質問している、または判断・承認・情報を求めている |
+
+| `JEV_LOOP_WATCH` | 動き |
+|---|---|
+| `off`（既定） | フックを付けません |
+| `shadow` | 判定をログに残すだけで、通知はしません |
+| `on` | 判定をログに残し、次のときに通知先へ知らせます |
+
+- `on` で知らせるのは次の 2 つのときです
+  - `ask_human` と判定したとき。直近の返答の末尾 300 文字を添えます
+  - 同じセッションで `stuck` が続けて 2 回出たとき
+- 同じセッションへの同じ通知は、状態が変わるまで繰り返しません
+- フックは判定を待たずにすぐ空の応答を返すので、Claude Code の動きは変わりません。セッションを止めたり、続きを指示したりもしません
+- キー未設定・タイムアウト（1500ms）・API エラーのときは、ログに `error` を残すだけで何もしません。前回の判定と `stuck` の回数も変えません
+- フックはセッションを起動するときに付けます。`JEV_LOOP_WATCH` を変えても、すでに動いているセッションには効きません
+
+判定は `DATA_DIR/logs/jev-loop-watch.jsonl` に 1 回 1 行で残ります。
+返答には秘密が含まれることがあるので、先頭と末尾の 100 文字だけを残します。
+
+| フィールド | 内容 |
+|---|---|
+| `mode` / `session` / `issue` | モード、tmux のセッション名、issue |
+| `turn` | そのセッションで何回目の返答か |
+| `state` / `probabilities` | 選んだ状態と、状態ごとの確率（失敗したときは `null`） |
+| `previous` | 前回の判定 |
+| `message_head` / `message_tail` / `message_length` | 返答の先頭と末尾の 100 文字、返答の長さ |
+| `alert` | `on` なら知らせた状態（`ask_human` / `stuck`）。`shadow` でも記録するので、`on` にしたときの通知の数を見積もれます |
+| `latency_ms` / `error` / `jev_model` | Jev の応答時間、失敗したときの理由、応答した Jev のバージョン |
+
+`on` にする前に、知らせることになる判定と、そのときの返答の末尾を見比べます。
+
+```
+jq -c 'select(.alert) | {issue, turn, state, alert, message_tail}' jev-loop-watch.jsonl
 ```
 
 ### 注意
@@ -1188,6 +1244,9 @@ AIエージェント（CLI spawn / Local LLM exec）に渡す環境変数は `sr
 | `EVENT_CLAUDE_SKIP_PERMISSIONS` | `false`（`0` / `no` / `off`）にすると、イベントから起動する `claude` に `--dangerously-skip-permissions` を付けない | 付ける |
 | `EVENT_WAKE_CHANNEL_ID` | 投稿を合図に、ウォッチリストの issue をすぐ確認する Slack チャンネル | - |
 | `JEV_READINESS` | issue の内容で作業を始められるかの Jev の判定（`off` / `shadow` / `on`）。「作業を始められるかの判定（Jev）」を参照 | `off` |
+| `JEV_TOOL_RISK` | issue から起動した Claude Code のツール実行前のリスク判定（`off` / `shadow` / `on`）。「ツール実行前のリスク判定（Jev）」を参照 | `off` |
+| `JEV_LOOP_WATCH` | issue から起動した Claude Code が返答を終えるたびの、作業の状態の判定（`off` / `shadow` / `on`）。「返答ごとの作業の状態の判定（Jev）」を参照 | `off` |
+| `EVENT_TOOL_RISK_PORT` | リスク判定と作業の状態の判定のフックを受けるポート | `18190` |
 
 ### GitHub App認証（オプション）
 
