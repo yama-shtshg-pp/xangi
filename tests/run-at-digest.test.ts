@@ -18,7 +18,7 @@ const NOW = new Date('2026-11-16T00:00:00Z');
 
 describe('formatJst', () => {
   it('JST の日時にする', () => {
-    expect(formatJst(new Date('2026-11-19T23:30:00Z'))).toBe('2026-11-20 08:30');
+    expect(formatJst(new Date('2026-11-19T23:30:00Z'))).toBe('2026-11-20（金）08:30');
   });
 });
 
@@ -27,20 +27,24 @@ describe('buildRunAtDigest', () => {
     expect(buildRunAtDigest([issue(1, '本文だけ')], NOW)).toBeUndefined();
   });
 
-  it('起動待ちの issue を起動日時の近い順に並べる', () => {
+  it('起動待ちの issue を起動日時の近い順に、日時ごとにまとめて並べる', () => {
     const message = buildRunAtDigest(
       [
         issue(1, 'xangi-run-at: 2026-12-01'),
         issue(2, 'xangi-run-at: 2026-11-20T14:00'),
         issue(3, 'なし'),
+        issue(4, 'xangi-run-at: 2026-11-20T14:00'),
       ],
       NOW
     );
     expect(message).toBe(
       [
-        '*起動日を待っている issue（2 件）*',
-        '• 2026-11-20 14:00 <https://github.com/o/r/issues/2|o/r#2> issue 2',
-        '• 2026-12-01 09:00 <https://github.com/o/r/issues/1|o/r#1> issue 1',
+        '*起動日を待っている issue（3 件）*',
+        '• 2026-11-20（金）14:00',
+        '    ◦ <https://github.com/o/r/issues/2|issue 2> r#2',
+        '    ◦ <https://github.com/o/r/issues/4|issue 4> r#4',
+        '• 2026-12-01（火）09:00',
+        '    ◦ <https://github.com/o/r/issues/1|issue 1> r#1',
       ].join('\n')
     );
   });
@@ -62,11 +66,12 @@ describe('buildRunAtDigest', () => {
     expect(message).toBe(
       [
         '*起動日を待っている issue（1 件）*',
-        '• 2026-11-20 09:00 <https://github.com/o/r/issues/1|o/r#1> issue 1',
+        '• 2026-11-20（金）09:00',
+        '    ◦ <https://github.com/o/r/issues/1|issue 1> r#1',
         '',
         '*起動日を読めず、起動しない issue（1 件）*',
         '`xangi-run-at: YYYY-MM-DD` か `YYYY-MM-DDTHH:MM` に直すと起動します',
-        '• <https://github.com/o/r/issues/2|o/r#2> issue 2（`2026/11/20`）',
+        '• <https://github.com/o/r/issues/2|issue 2> r#2（`2026/11/20`）',
       ].join('\n')
     );
   });
@@ -76,8 +81,8 @@ describe('buildRunAtDigest', () => {
       [issue(1, 'xangi-run-at:'), issue(2, 'xangi-run-at: ``')],
       NOW
     );
-    expect(message).toContain('o/r#1> issue 1（値が空）');
-    expect(message).toContain('o/r#2> issue 2（値が空）');
+    expect(message).toContain('|issue 1> r#1（値が空）');
+    expect(message).toContain('|issue 2> r#2（値が空）');
   });
 
   it('読めない issue だけでも送る', () => {
@@ -94,8 +99,8 @@ describe('buildRunAtDigest', () => {
       ],
       NOW
     );
-    expect(message).toContain('o/r#1> a &lt;b&gt; &amp; c');
-    expect(message).toContain('o/r#2> &lt;!channel&gt;（`&lt;x&gt;`）');
+    expect(message).toContain('|a &lt;b&gt; &amp; c> r#1');
+    expect(message).toContain('|&lt;!channel&gt;> r#2（`&lt;x&gt;`）');
   });
 });
 
@@ -116,7 +121,7 @@ describe('sendRunAtDigest', () => {
     });
     expect(sent).toBe(true);
     expect(send).toHaveBeenCalledOnce();
-    expect(send.mock.calls[0][0]).toContain('o/r#1');
+    expect(send.mock.calls[0][0]).toContain('r#1');
   });
 
   it('一覧がなければ送らない', async () => {
