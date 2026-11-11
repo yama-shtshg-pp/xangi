@@ -159,6 +159,19 @@ describe('startToolRiskServer', () => {
       expect(handleStop).toHaveBeenCalledWith(expect.objectContaining({ lastMessage: undefined }));
     });
 
+    it('checker を渡さなければ、PreToolUse の受け口は 404', async () => {
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const handleStop = vi.fn(async () => {});
+      server = startToolRiskServer({
+        port: 0,
+        loopWatch: { handleStop } as unknown as LoopWatcher,
+      });
+      await new Promise((resolve) => server!.once('listening', resolve));
+      const { port } = server.address() as AddressInfo;
+      expect((await post(port, JSON.stringify({ tool_name: 'Bash' }))).status).toBe(404);
+      expect((await post(port, '{}', path)).status).toBe(200);
+    });
+
     it('loopWatch を渡さなければ 404', async () => {
       const { port } = await start(allow);
       expect((await post(port, '{}', path)).status).toBe(404);

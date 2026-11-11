@@ -50,7 +50,8 @@ export function buildHookResponse(verdict: ToolRiskVerdict): string {
 }
 
 export interface ToolRiskServerOptions {
-  checker: ToolRiskChecker;
+  /** ツール実行前のリスク判定。未指定なら PreToolUse の受け口は 404 */
+  checker?: ToolRiskChecker;
   port: number;
   /** セッション名から issue を引く。分からなければ undefined */
   resolveSession?: (session: string) => { id: string; title: string } | undefined;
@@ -76,7 +77,7 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 export function startToolRiskServer(options: ToolRiskServerOptions): Server {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const isToolRisk = url.pathname === TOOL_RISK_PATH;
+    const isToolRisk = url.pathname === TOOL_RISK_PATH && options.checker !== undefined;
     const isLoopWatch = url.pathname === LOOP_WATCH_PATH && options.loopWatch !== undefined;
     if ((!isToolRisk && !isLoopWatch) || req.method !== 'POST') {
       res.writeHead(404);
@@ -117,7 +118,7 @@ export function startToolRiskServer(options: ToolRiskServerOptions): Server {
       const issue = options.resolveSession?.(session);
       const toolName = body.tool_name ?? '';
       const toolInput = body.tool_input ?? {};
-      const verdict = await options.checker.check({
+      const verdict = await options.checker!.check({
         session,
         issueId: issue?.id,
         issueTitle: issue?.title,

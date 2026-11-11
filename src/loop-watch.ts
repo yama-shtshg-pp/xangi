@@ -54,6 +54,21 @@ function tail(text: string, limit: number): string {
   return text.length > limit ? `…${text.slice(-limit)}` : text;
 }
 
+/**
+ * 通知に引用する返答を整える
+ * エージェントの出力に @everyone やメンションがあっても、通知先で人を呼ばないようにする。
+ * コードブロックの区切りで引用が崩れないよう、``` も崩す
+ */
+export function quoteAgentMessage(text: string): string {
+  return text
+    .replace(/@/g, '@\u200b')
+    .replace(/<(@|#)/g, '<\u200b$1')
+    .replace(/```/g, "'''")
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
+}
+
 export interface LoopStateInput {
   issueTitle: string;
   lastMessage: string;
@@ -161,6 +176,11 @@ export class LoopWatcher {
     return this.options.mode;
   }
 
+  /** セッションの回数と判定を忘れる。同じ名前で起動し直すときに呼ぶ */
+  forget(session: string): void {
+    this.sessions.delete(session);
+  }
+
   /**
    * 返答を終えたときに呼ぶ。例外は投げない
    * - off: 何もしない（フックも付けない前提）
@@ -220,7 +240,7 @@ export class LoopWatcher {
       if (state === 'ask_human') alert = 'ask_human';
       else if (state === 'stuck' && memory.stuckStreak >= STUCK_STREAK_TO_NOTIFY) alert = 'stuck';
       if (alert && memory.notified === alert) alert = undefined;
-      else if (!alert && memory.notified !== state) memory.notified = undefined;
+      else if (!alert) memory.notified = undefined;
       // shadow でも on と同じように覚え、ログの alert で「on なら知らせたか」を確かめられるようにする
       if (alert) memory.notified = alert;
     }

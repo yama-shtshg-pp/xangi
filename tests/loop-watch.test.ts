@@ -6,6 +6,7 @@ import {
   getJevLoopWatchMode,
   judgeLoopState,
   LoopWatcher,
+  quoteAgentMessage,
   type LoopState,
   type LoopStateInput,
   type JudgeLoopState,
@@ -20,6 +21,14 @@ describe('getJevLoopWatchMode', () => {
     expect(getJevLoopWatchMode({ JEV_LOOP_WATCH: ' On ' })).toBe('on');
     expect(getJevLoopWatchMode({ JEV_LOOP_WATCH: 'true' })).toBe('off');
     vi.restoreAllMocks();
+  });
+});
+
+describe('quoteAgentMessage', () => {
+  it('行ごとに引用にし、メンションとコードブロックの区切りを崩す', () => {
+    expect(quoteAgentMessage('@everyone 見て\n<@123> ```ts')).toBe(
+      "> @\u200beveryone 見て\n> <\u200b@\u200b123> '''ts"
+    );
   });
 });
 
@@ -267,5 +276,14 @@ describe('LoopWatcher', () => {
     const { judge, watcher: w } = watcher('shadow', ['stuck', 'continue']);
     await Promise.all([stop(w, '1'), stop(w, '2')]);
     expect(judge.mock.calls[1][0]).toMatchObject({ turn: 2, previous: 'stuck', lastMessage: '2' });
+  });
+
+  it('forget すると、同じ名前で起動し直したセッションを 1 回目から数え直す', async () => {
+    const { judge, notify, watcher: w } = watcher('on', ['ask_human', 'ask_human']);
+    await stop(w);
+    w.forget('cc-a-issue1');
+    await stop(w);
+    expect(judge.mock.calls[1][0]).toMatchObject({ turn: 1, previous: undefined });
+    expect(notify).toHaveBeenCalledTimes(2);
   });
 });
