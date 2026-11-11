@@ -85,6 +85,27 @@ describe('buildRunAtDigest', () => {
     expect(message).toContain('|issue 2> r#2（値が空）');
   });
 
+  it('名前が同じ別のリポジトリがあれば、owner を残す', () => {
+    const other = { ...issue(2, 'xangi-run-at: 2026-11-20'), id: 'x/r#2' };
+    const message = buildRunAtDigest(
+      [
+        issue(1, 'xangi-run-at: 2026-11-20'),
+        other,
+        { ...issue(3, 'xangi-run-at: 来週'), id: 'o/s#3' },
+      ],
+      NOW
+    );
+    expect(message).toContain('|issue 1> o/r#1\n');
+    expect(message).toContain('|issue 2> x/r#2\n');
+    expect(message).toContain('|issue 3> s#3（');
+  });
+
+  it('タイトルが空なら番号をリンクにする', () => {
+    expect(buildRunAtDigest([issue(1, 'xangi-run-at: 2026-11-20', ' ')], NOW)).toContain(
+      '<https://github.com/o/r/issues/1|r#1> r#1'
+    );
+  });
+
   it('読めない issue だけでも送る', () => {
     expect(buildRunAtDigest([issue(1, 'xangi-run-at: 来週')], NOW)).toContain(
       '*起動日を読めず、起動しない issue（1 件）*'
@@ -121,7 +142,8 @@ describe('sendRunAtDigest', () => {
     });
     expect(sent).toBe(true);
     expect(send).toHaveBeenCalledOnce();
-    expect(send.mock.calls[0][0]).toContain('r#1');
+    expect(send.mock.calls[0][0]).toContain('|issue 1> r#1');
+    expect(send.mock.calls[0][0]).not.toContain('o/r#1');
   });
 
   it('一覧がなければ送らない', async () => {

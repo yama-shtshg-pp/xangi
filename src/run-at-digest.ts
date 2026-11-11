@@ -12,13 +12,11 @@ import { JST_OFFSET_MS, parseRunAt } from './run-at.js';
 /** 毎週月曜の 09:00（JST） */
 export const RUN_AT_DIGEST_CRON = '0 9 * * 1';
 
-const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
-
 /** `2026-11-20（金）09:00` の形にする（JST） */
 export function formatJst(date: Date): string {
-  const jst = new Date(date.getTime() + JST_OFFSET_MS);
-  const iso = jst.toISOString();
-  return `${iso.slice(0, 10)}（${WEEKDAYS[jst.getUTCDay()]}）${iso.slice(11, 16)}`;
+  const iso = new Date(date.getTime() + JST_OFFSET_MS).toISOString();
+  const weekday = date.toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo', weekday: 'short' });
+  return `${iso.slice(0, 10)}（${weekday}）${iso.slice(11, 16)}`;
 }
 
 /** Slack の mrkdwn で特別な意味を持つ文字を逃がす */
@@ -26,9 +24,32 @@ function escapeSlack(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/** タイトルをリンクにし、後ろにリポジトリ名と番号を添える（`owner/` は省く） */
-function issueLine(event: AgentEvent): string {
-  return `<${event.url}|${escapeSlack(event.title)}> ${escapeSlack(event.id.replace(/^[^/]*\//, ''))}`;
+/** `owner/repo#12` から `repo#12` を取る */
+function shortId(id: string): string {
+  return id.replace(/^[^/]*\//, '');
+}
+
+/**
+ * タイトルをリンクにし、後ろにリポジトリ名と番号を添える
+ * 名前が同じ別のリポジトリが一覧にあれば、見分けられるよう `owner/` を残す
+ */
+function issueLine(event: AgentEvent, ambiguous: Set<string>): string {
+  const repo = event.id.replace(/#\d+$/, '');
+  const id = ambiguous.has(shortId(repo).toLowerCase()) ? event.id : shortId(event.id);
+  // タイトルが空だとリンクの文字が見えないので、番号をリンクにする
+  const text = event.title.trim() ? event.title : id;
+  return `<${event.url}|${escapeSlack(text)}> ${escapeSlack(id)}`;
+}
+
+/** 一覧に出るリポジトリのうち、owner を省くと名前が重なるもの（小文字） */
+function ambiguousRepoNames(events: AgentEvent[]): Set<string> {
+  const owners = new Map<string, Set<string>>();
+  for (const event of events) {
+    const repo = event.id.replace(/#\d+$/, '').toLowerCase();
+    const name = shortId(repo);
+    owners.set(name, (owners.get(name) ?? new Set()).add(repo));
+  }
+  return new Set([...owners].filter(([, repos]) => repos.size > 1).map(([name]) => name));
 }
 
 /**
@@ -53,19 +74,22 @@ export function buildRunAtDigest(
   }
   if (waiting.length === 0 && invalid.length === 0 && failedRepos.length === 0) return undefined;
 
+  const ambiguous = ambiguousRepoNames([
+    ...waiting.map((w) => w.event),
+    ...invalid.map((i) => i.event),
+  ]);
   const lines: string[] = [];
   if (waiting.length > 0) {
     waiting.sort((a, b) => a.at.getTime() - b.at.getTime());
     lines.push(`*起動日を待っている issue（${waiting.length} 件）*`);
     // 同じ日時の issue は、1 つの日時の下にまとめる
-    let current: string | undefined;
+    let current: number | undefined;
     for (const { event, at } of waiting) {
-      const when = formatJst(at);
-      if (when !== current) {
-        lines.push(`• ${when}`);
-        current = when;
+      if (at.getTime() !== current) {
+        lines.push(`• ${formatJst(at)}`);
+        current = at.getTime();
       }
-      lines.push(`    ◦ ${issueLine(event)}`);
+      lines.push(`    ◦ ${issueLine(event, ambiguous)}`);
     }
   }
   if (invalid.length > 0) {
@@ -77,7 +101,9 @@ export function buildRunAtDigest(
     for (const { event, value } of invalid) {
       // 値にバッククォートがあるとコードの表示が切れるので外す。空なら空と書く
       const shown = value.replace(/`/g, '');
-      lines.push(`• ${issueLine(event)}（${shown ? `\`${escapeSlack(shown)}\`` : '値が空'}）`);
+      lines.push(
+        `• ${issueLine(event, ambiguous)}（${shown ? `\`${escapeSlack(shown)}\`` : '値が空'}）`
+      );
     }
   }
   if (failedRepos.length > 0) {
