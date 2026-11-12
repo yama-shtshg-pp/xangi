@@ -1,13 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  ISSUE_ONLY_DM_REPLY,
+  WAKE_CHANNEL_MENTION_REPLY,
   buildIssueConfirmBlocks,
   handleEventWake,
   isAllowedSlackUser,
   isEventWakeChannel,
-  shouldSkipThreadReply,
+  issueMentionReply,
+  issueOnlyMessageReply,
   toThreadMessages,
 } from '../src/slack.js';
-import { ISSUE_CREATE_ACTION, decodeIssueRequest, type IssueRequest } from '../src/slack-issue.js';
+import {
+  ISSUE_CREATE_ACTION,
+  decodeIssueRequest,
+  type IssueRequest,
+  type SlackIssueCreator,
+} from '../src/slack-issue.js';
 
 describe('handleEventWake', () => {
   let onWake: ReturnType<typeof vi.fn>;
@@ -67,30 +75,53 @@ describe('isEventWakeChannel', () => {
   });
 });
 
-describe('shouldSkipThreadReply', () => {
-  const base = {
-    isDM: false,
-    isThreadReply: true,
-    isAutoReplyChannel: false,
-    mentionIssueMode: true,
-    text: 'メモ',
-  };
+describe('issueMentionReply', () => {
+  // handle に渡るかだけを見るので、中身は使わない
+  const creator = {} as SlackIssueCreator;
 
-  it('メンションから issue を立てるインスタンスでは、自動応答のチャンネル以外のスレッドの返信を会話にしない', () => {
-    expect(shouldSkipThreadReply(base)).toBe(true);
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it('自動応答のチャンネルのスレッドでは会話を続け、メンションだけ app_mention に任せる', () => {
-    expect(shouldSkipThreadReply({ ...base, isAutoReplyChannel: true })).toBe(false);
-    expect(shouldSkipThreadReply({ ...base, isAutoReplyChannel: true, text: '<@U1> 1' })).toBe(
-      true
-    );
+  it('issue を立てる処理があれば、handle の返事をそのまま返す', async () => {
+    const handle = vi.fn(async () => ({ text: 'o/a に issue を作りますか？' }));
+    expect(await issueMentionReply(creator, false, handle)).toEqual({
+      text: 'o/a に issue を作りますか？',
+    });
+    expect(handle).toHaveBeenCalledWith(creator);
   });
 
-  it('DM、スレッドの外、メンションから issue を立てないインスタンスでは会話にする', () => {
-    expect(shouldSkipThreadReply({ ...base, isDM: true })).toBe(false);
-    expect(shouldSkipThreadReply({ ...base, isThreadReply: false })).toBe(false);
-    expect(shouldSkipThreadReply({ ...base, mentionIssueMode: false })).toBe(false);
+  it('処理を作れなかったときは、会話にせず理由を返す', async () => {
+    const handle = vi.fn();
+    const reply = await issueMentionReply('記録を読めません', false, handle);
+    expect(reply.text).toBe('⚠️ issue を立てられません: 記録を読めません');
+    expect(handle).not.toHaveBeenCalled();
+  });
+
+  it('合図のチャンネルでは、issue を立てないことを返す', async () => {
+    const handle = vi.fn();
+    expect((await issueMentionReply(creator, true, handle)).text).toBe(WAKE_CHANNEL_MENTION_REPLY);
+    expect((await issueMentionReply('理由', true, handle)).text).toBe(WAKE_CHANNEL_MENTION_REPLY);
+    expect(handle).not.toHaveBeenCalled();
+  });
+
+  it('handle が失敗したら、黙らずにエラーを返す', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const reply = await issueMentionReply(creator, false, async () => {
+      throw new Error('gh が見つかりません');
+    });
+    expect(reply.text).toBe('⚠️ issue を立てられませんでした: gh が見つかりません');
+  });
+});
+
+describe('issueOnlyMessageReply', () => {
+  it('許可したユーザーの DM には、チャンネルでメンションするよう案内する', () => {
+    expect(issueOnlyMessageReply({ isDM: true, allowed: true })).toBe(ISSUE_ONLY_DM_REPLY);
+  });
+
+  it('許可していないユーザーの DM と、チャンネルの投稿には返事をしない', () => {
+    expect(issueOnlyMessageReply({ isDM: true, allowed: false })).toBeUndefined();
+    expect(issueOnlyMessageReply({ isDM: false, allowed: true })).toBeUndefined();
   });
 });
 

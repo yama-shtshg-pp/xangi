@@ -318,14 +318,13 @@ export class SlackIssueCreator {
 
   /**
    * メンションを処理し、スレッドに返す文を返す。issue は立てず、立てられるときは確認を返す
-   * 最初の語が key の形でなく、チャンネルの既定の key もなければ undefined を返す（呼び出し側は会話として扱う）
+   * key が決まらなければ、key の一覧を返す（会話にはしない）
    */
-  async handleMention(input: MentionInput): Promise<MentionReply | undefined> {
+  async handleMention(input: MentionInput): Promise<MentionReply> {
     const parsed = parseMention(input.text);
     // 最初の語が key の形なら、チャンネルの既定より優先する
     const explicitKey = parsed.key && KEY_PATTERN.test(parsed.key) ? parsed.key : undefined;
     const defaultKey = explicitKey ? undefined : await input.loadChannelDefaultKey?.();
-    if (!explicitKey && !defaultKey && stripMention(input.text)) return undefined;
     const key = explicitKey ?? defaultKey;
     // 既定の key を使うときは、メンションの文をすべて補足（スレッドの外なら本文）にする
     const rest = mentionRest(input.text, !!explicitKey);

@@ -247,9 +247,19 @@ describe('SlackIssueCreator', () => {
     expect(gh).toHaveBeenCalledTimes(1);
   });
 
-  it('最初の語が key の形でなければ undefined を返し（会話にする）、issue は立てない', async () => {
-    expect(await run(makeCreator(), input({ text: '<@U0> この関数の意味は？' }))).toBe(undefined);
+  it('最初の語が key の形でなければ、会話にせず key の一覧を返し、issue は立てない', async () => {
+    const reply = await run(makeCreator(), input({ text: '<@U0> この関数の意味は？' }));
+    expect(reply).toContain('key で指定してください');
+    expect(reply).toContain('- `1` o/a');
     expect(gh).not.toHaveBeenCalled();
+  });
+
+  it('issue を立てたスレッドで key なしのメンションをすると、立てた issue の URL を返す', async () => {
+    const creator = makeCreator();
+    await run(creator, input());
+    const reply = await run(creator, input({ text: '<@U0> 追加の情報です', mentionTs: '100.9' }));
+    expect(reply).toContain('もう立てています: https://github.com/o/a/issues/5');
+    expect(gh).toHaveBeenCalledTimes(1);
   });
 
   it('スレッドの外で key だけなら、内容を書くよう返し、issue は立てない', async () => {
@@ -556,22 +566,22 @@ describe('SlackIssueCreator', () => {
       expect(gh).not.toHaveBeenCalled();
     });
 
-    it('既定がなければ、これまでどおり key の形でない語は会話にする', async () => {
+    it('既定がなければ、key の形でない語には key の一覧を返す', async () => {
       expect(
         await run(
           makeCreator(),
           input({ text: '<@U0> この関数の意味は？', ...withDefault(undefined) })
         )
-      ).toBeUndefined();
+      ).toContain('key で指定してください');
       expect(gh).not.toHaveBeenCalled();
     });
 
-    it('既定がなければ、改行してから書いた本文は会話にする', async () => {
-      expect(
-        await makeCreator().handleMention(
-          input({ text: '<@U0>\nPub write の意味は？', ...withDefault(undefined) })
-        )
-      ).toBeUndefined();
+    it('既定がなければ、改行してから書いた本文にも key の一覧を返す', async () => {
+      const reply = await makeCreator().handleMention(
+        input({ text: '<@U0>\nPub write の意味は？', ...withDefault(undefined) })
+      );
+      expect(reply.text).toContain('key で指定してください');
+      expect(reply.request).toBeUndefined();
       expect(gh).not.toHaveBeenCalled();
     });
 
