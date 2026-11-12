@@ -375,7 +375,11 @@ export const WAKE_CHANNEL_MENTION_REPLY =
 
 /** issue 専用のときに、DM に返す文 */
 export const ISSUE_ONLY_DM_REPLY =
-  'この xangi は issue を立てる専用で、DM では会話も issue の作成もしません。issue はチャンネルで `@xangi <key> <内容>` とメンションして立ててください';
+  'この App は issue を立てる専用で、DM では会話も issue の作成もしません。issue は、チャンネルでこの App をメンションし、key と内容を書いて立ててください';
+
+/** issue 専用のときに、会話のためのスラッシュコマンドに返す文 */
+export const ISSUE_ONLY_COMMAND_REPLY =
+  'この App は issue を立てる専用なので、このコマンドは使えません。issue はチャンネルでこの App をメンションして立ててください';
 
 /**
  * issue 専用のときに、メンションのない投稿に返す文。undefined なら黙る
@@ -560,7 +564,14 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
         await update(`⚠️ issue を立てられません: ${creator}`);
         return;
       }
-      if (!request || !creator) {
+      if (!creator) {
+        // EVENTS_ENABLED を外して再起動したあとに、前に出したボタンが押されたとき
+        await update(
+          '⚠️ この xangi は issue を立てる設定になっていないため、issue を立てられません'
+        );
+        return;
+      }
+      if (!request) {
         await update('⚠️ issue を立てられませんでした。もう一度メンションしてください');
         return;
       }
@@ -843,6 +854,11 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
   // /new コマンド
   app.command('/new', async ({ command, ack, respond }) => {
     await ack();
+    // issue 専用のときは、会話のセッションやスキルを扱うコマンドを受けない
+    if (options.mentionIssue) {
+      await respond({ text: ISSUE_ONLY_COMMAND_REPLY, response_type: 'ephemeral' });
+      return;
+    }
 
     if (
       !config.slack.allowedUsers?.includes('*') &&
@@ -859,6 +875,11 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
   // /skills コマンド
   app.command('/skills', async ({ command, ack, respond }) => {
     await ack();
+    // issue 専用のときは、会話のセッションやスキルを扱うコマンドを受けない
+    if (options.mentionIssue) {
+      await respond({ text: ISSUE_ONLY_COMMAND_REPLY, response_type: 'ephemeral' });
+      return;
+    }
 
     if (
       !config.slack.allowedUsers?.includes('*') &&
@@ -893,6 +914,11 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
   // /skill コマンド
   app.command('/skill', async ({ command, ack, respond }) => {
     await ack();
+    // issue 専用のときは、会話のセッションやスキルを扱うコマンドを受けない
+    if (options.mentionIssue) {
+      await respond({ text: ISSUE_ONLY_COMMAND_REPLY, response_type: 'ephemeral' });
+      return;
+    }
 
     if (
       !config.slack.allowedUsers?.includes('*') &&
@@ -934,6 +960,11 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
   // /settings コマンド
   app.command('/settings', async ({ command, ack, respond }) => {
     await ack();
+    // issue 専用のときは、会話のセッションやスキルを扱うコマンドを受けない
+    if (options.mentionIssue) {
+      await respond({ text: ISSUE_ONLY_COMMAND_REPLY, response_type: 'ephemeral' });
+      return;
+    }
 
     if (
       !config.slack.allowedUsers?.includes('*') &&

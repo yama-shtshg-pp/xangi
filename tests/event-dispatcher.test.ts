@@ -492,6 +492,7 @@ describe('loadEventConfig', () => {
   it('既定は無効。ラベルは agent、間隔は 300 秒', () => {
     expect(loadEventConfig({})).toEqual({
       enabled: false,
+      requested: false,
       githubRepos: [],
       githubLabel: 'agent',
       pollIntervalMs: 300_000,
@@ -522,6 +523,7 @@ describe('loadEventConfig', () => {
       })
     ).toEqual({
       enabled: true,
+      requested: true,
       githubRepos: ['o/a', 'o/b'],
       githubLabel: 'bot',
       pollIntervalMs: 60_000,
@@ -557,9 +559,11 @@ describe('loadEventConfig', () => {
     warn.mockRestore();
   });
 
-  it('リポジトリが空なら有効にしない', () => {
+  it('リポジトリが空なら有効にしないが、EVENTS_ENABLED で有効にしたことは残す', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(loadEventConfig({ EVENTS_ENABLED: 'true' }).enabled).toBe(false);
+    const config = loadEventConfig({ EVENTS_ENABLED: 'true' });
+    expect(config.enabled).toBe(false);
+    expect(config.requested).toBe(true);
     warn.mockRestore();
   });
 

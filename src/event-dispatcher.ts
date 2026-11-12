@@ -23,6 +23,8 @@ import type { SessionActivity } from './tmux-launcher.js';
 
 export interface EventConfig {
   enabled: boolean;
+  /** EVENTS_ENABLED で有効にしたか。ウォッチリストがなくて enabled が false になっても true のまま */
+  requested: boolean;
   /** EVENT_GITHUB_REPOS（ウォッチリストがないときだけ使う） */
   githubRepos: string[];
   /** ウォッチリストの項目で label を省略したときにも使う */
@@ -75,7 +77,8 @@ export function loadEventConfig(
     .split(',')
     .map((r) => r.trim())
     .filter(Boolean);
-  let enabled = env.EVENTS_ENABLED === 'true';
+  const requested = env.EVENTS_ENABLED === 'true';
+  let enabled = requested;
   if (enabled && !hasWatchList && githubRepos.length === 0) {
     console.warn(
       '[event-dispatcher] EVENTS_ENABLED=true but neither watch-repos.json nor EVENT_GITHUB_REPOS is set. Disabled.'
@@ -87,6 +90,7 @@ export function loadEventConfig(
   }
   return {
     enabled,
+    requested,
     githubRepos,
     githubLabel: env.EVENT_GITHUB_LABEL?.trim() || 'agent',
     pollIntervalMs: parsePositiveNumber(env.EVENT_POLL_INTERVAL_SEC, 300) * 1000,

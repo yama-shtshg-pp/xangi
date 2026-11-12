@@ -1218,7 +1218,7 @@ async function main() {
   // メンションから issue を立てる処理。dispatcher を作れたときだけ用意する
   let slackIssueCreator: SlackIssueCreator | undefined;
   // EVENTS_ENABLED なら Slack は issue 専用にし、会話しない。処理を作れなくても会話には戻さない
-  const slackIssueOnly = process.env.EVENTS_ENABLED === 'true';
+  const slackIssueOnly = eventConfig.requested;
   // issue を立てる処理を作れていない理由。メンションへの返事に使う
   const slackIssueStarting = '起動の途中です。少し待ってからメンションしてください';
   let slackIssueUnavailable = eventConfig.enabled
