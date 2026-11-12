@@ -363,10 +363,50 @@ export interface SlackChannelOptions {
   /** 投稿があったら onWake を呼ぶチャンネル。このチャンネルの投稿には返事をしない */
   eventWake?: { channelId: string; onWake: () => void };
   /**
-   * メンションから issue を立てる処理。undefined を返す間（イベントからの起動が無効なとき）は、
-   * これまでどおりメンションを会話として扱う
+   * 渡すと issue 専用になり、Slack では会話しない。issue を立てる処理か、立てられない理由を返す
+   * 渡さなければ（EVENTS_ENABLED でなければ）、これまでどおりメンション・DM・自動応答チャンネルで会話する
    */
-  mentionIssue?: () => SlackIssueCreator | undefined;
+  mentionIssue?: () => SlackIssueCreator | string;
+}
+
+/** issue 専用のときに、合図のチャンネルでメンションされたら返す文 */
+export const WAKE_CHANNEL_MENTION_REPLY =
+  'このチャンネルは GitHub の通知を受けるチャンネルなので、issue を立てません。ほかのチャンネルでメンションしてください';
+
+/** issue 専用のときに、DM に返す文 */
+export const ISSUE_ONLY_DM_REPLY =
+  'この xangi は issue を立てる専用で、DM では会話も issue の作成もしません。issue はチャンネルで `@xangi <key> <内容>` とメンションして立ててください';
+
+/**
+ * issue 専用のときに、メンションのない投稿に返す文。undefined なら黙る
+ * DM だけ案内を返す。チャンネルの投稿やスレッドの返信は、人どうしのやり取りやメモなので返事をしない
+ */
+export function issueOnlyMessageReply(message: {
+  isDM: boolean;
+  allowed: boolean;
+}): string | undefined {
+  return message.isDM && message.allowed ? ISSUE_ONLY_DM_REPLY : undefined;
+}
+
+/**
+ * issue 専用のときのメンションに返す文。立てられないときも、必ず理由を返す
+ * @param handle issue を立てる処理があるときに、メンションを渡して確認の文を作る
+ */
+export async function issueMentionReply(
+  issue: SlackIssueCreator | string,
+  inWakeChannel: boolean,
+  handle: (creator: SlackIssueCreator) => Promise<MentionReply>
+): Promise<MentionReply> {
+  if (inWakeChannel) return { text: WAKE_CHANNEL_MENTION_REPLY };
+  if (typeof issue === 'string') return { text: `⚠️ issue を立てられません: ${issue}` };
+  try {
+    return await handle(issue);
+  } catch (err) {
+    console.error('[slack] Failed to create issue from mention:', err);
+    return {
+      text: `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 export function isEventWakeChannel(
@@ -407,22 +447,6 @@ export function handleEventWake(
   }
   eventWake.onWake();
   return true;
-}
-
-/**
- * メンションから issue を立てるインスタンスで、スレッドの返信を会話にしないか
- * - 自動応答のチャンネル以外のスレッドの返信: エラー通知のスレッドに書いたメモに AI が返事をしてしまう
- * - 自動応答のチャンネルのスレッドの中のメンション: app_mention で受けるので二重に処理しない
- */
-export function shouldSkipThreadReply(message: {
-  isDM: boolean;
-  isThreadReply: boolean;
-  isAutoReplyChannel: boolean;
-  mentionIssueMode: boolean;
-  text: string;
-}): boolean {
-  if (message.isDM || !message.isThreadReply || !message.mentionIssueMode) return false;
-  return !message.isAutoReplyChannel || /<@[A-Z0-9]+>/i.test(message.text);
 }
 
 export async function startSlackBot(options: SlackChannelOptions): Promise<void> {
@@ -532,6 +556,10 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
 
       const request = decodeIssueRequest(action.value);
       const creator = options.mentionIssue?.();
+      if (typeof creator === 'string') {
+        await update(`⚠️ issue を立てられません: ${creator}`);
+        return;
+      }
       if (!request || !creator) {
         await update('⚠️ issue を立てられませんでした。もう一度メンションしてください');
         return;
@@ -554,25 +582,23 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
 
   // メンション時の処理
   app.event('app_mention', async ({ event, say, client }) => {
-    // 合図のチャンネルでは、メンションされても会話として扱わない（合図は message イベントで受ける）
-    if (isEventWakeChannel(event.channel, options.eventWake)) return;
     const userId = event.user;
     if (!userId) return;
 
-    // 許可リストチェック
+    // 許可リストチェック。許可していない人には、issue を立てられない理由も返さない
     if (!config.slack.allowedUsers?.includes('*') && !config.slack.allowedUsers?.includes(userId)) {
       console.log(`[slack] Unauthorized user: ${userId}`);
       return;
     }
 
-    const creator = options.mentionIssue?.();
-    if (creator) {
+    const inWakeChannel = isEventWakeChannel(event.channel, options.eventWake);
+    const issue = options.mentionIssue?.();
+    if (issue !== undefined) {
       // スレッドの中なら、親メッセージ（エラー通知など）からメンションまでを issue にする
       const sourceTs = event.thread_ts ?? event.ts;
       const target = { channel: event.channel, ts: sourceTs, mentionTs: event.ts };
-      let reply: MentionReply | undefined;
-      try {
-        reply = await creator.handleMention({
+      const reply = await issueMentionReply(issue, inWakeChannel, (creator) =>
+        creator.handleMention({
           ...target,
           text: event.text || '',
           inThread: !!event.thread_ts,
@@ -584,7 +610,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
               return parseChannelDefaultKey(res.channel?.purpose?.value, res.channel?.topic?.value);
             } catch (err) {
               // channels:read（非公開なら groups:read）がないと読めない。指定なしとして扱う
-              // 権限がないと会話のメンションのたびに失敗するので、チャンネルとエラーごとに 1 回だけ残す
+              // 権限がないとメンションのたびに失敗するので、チャンネルとエラーごとに 1 回だけ残す
               const code = (err as { data?: { error?: string } }).data?.error ?? String(err);
               const logKey = `${event.channel}:${code}`;
               if (!channelInfoErrorsLogged.has(logKey)) {
@@ -594,23 +620,18 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
               return undefined;
             }
           },
-        });
-      } catch (err) {
-        console.error('[slack] Failed to create issue from mention:', err);
-        reply = {
-          text: `⚠️ issue を立てられませんでした: ${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-      if (reply !== undefined) {
-        await say({
-          text: reply.text,
-          thread_ts: sourceTs,
-          ...(reply.request ? { blocks: buildIssueConfirmBlocks(reply.text, reply.request) } : {}),
-        });
-        return;
-      }
-      // key の指定でなければ、これまでどおり会話として扱う
+        })
+      );
+      await say({
+        text: reply.text,
+        thread_ts: sourceTs,
+        ...(reply.request ? { blocks: buildIssueConfirmBlocks(reply.text, reply.request) } : {}),
+      });
+      return;
     }
+
+    // 合図のチャンネルでは、メンションされても会話として扱わない（合図は message イベントで受ける）
+    if (inWakeChannel) return;
 
     let text = (event.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
 
@@ -707,27 +728,29 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       `[slack] Message event: channel=${messageEvent.channel}, type=${messageEvent.channel_type}, autoReplyChannels=${config.slack.autoReplyChannels?.join(',')}`
     );
 
-    // DM, autoReplyChannels, またはスレッド内返信を処理
     const isDM = messageEvent.channel_type === 'im';
+
+    // issue 専用のときは会話しない。メンションは app_mention で受ける
+    if (options.mentionIssue) {
+      const reply = issueOnlyMessageReply({ isDM, allowed: isAllowedUser(messageEvent.user) });
+      if (!reply) {
+        console.log(`[slack] Skipping message (issue only): isDM=${isDM}`);
+        return;
+      }
+      await say({
+        text: reply,
+        ...(messageEvent.thread_ts && { thread_ts: messageEvent.thread_ts }),
+      });
+      return;
+    }
+
+    // DM, autoReplyChannels, またはスレッド内返信を処理
     const isAutoReplyChannel = config.slack.autoReplyChannels?.includes(messageEvent.channel);
     const isThreadReply = !!messageEvent.thread_ts;
     if (!isDM && !isAutoReplyChannel && !isThreadReply) {
       console.log(
         `[slack] Skipping: isDM=${isDM}, isAutoReplyChannel=${isAutoReplyChannel}, isThread=${isThreadReply}`
       );
-      return;
-    }
-
-    if (
-      shouldSkipThreadReply({
-        isDM,
-        isThreadReply,
-        isAutoReplyChannel: !!isAutoReplyChannel,
-        mentionIssueMode: !!options.mentionIssue?.(),
-        text: messageEvent.text || '',
-      })
-    ) {
-      console.log('[slack] Skipping thread reply (mention issue mode)');
       return;
     }
 

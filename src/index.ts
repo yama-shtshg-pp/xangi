@@ -1217,6 +1217,13 @@ async function main() {
   let wakeBeforeDispatcher = false;
   // メンションから issue を立てる処理。dispatcher を作れたときだけ用意する
   let slackIssueCreator: SlackIssueCreator | undefined;
+  // EVENTS_ENABLED なら Slack は issue 専用にし、会話しない。処理を作れなくても会話には戻さない
+  const slackIssueOnly = process.env.EVENTS_ENABLED === 'true';
+  // issue を立てる処理を作れていない理由。メンションへの返事に使う
+  const slackIssueStarting = '起動の途中です。少し待ってからメンションしてください';
+  let slackIssueUnavailable = eventConfig.enabled
+    ? slackIssueStarting
+    : `ウォッチリスト（${watchListPath}）も EVENT_GITHUB_REPOS もありません`;
 
   // Slackボットを起動
   if (config.slack.enabled) {
@@ -1239,7 +1246,7 @@ async function main() {
             },
           }
         : undefined,
-      mentionIssue: () => slackIssueCreator,
+      ...(slackIssueOnly ? { mentionIssue: () => slackIssueCreator ?? slackIssueUnavailable } : {}),
     });
     console.log('[xangi] Slack bot started');
   } else if (eventConfig.wakeChannelId) {
@@ -1278,8 +1285,10 @@ async function main() {
       console.error(
         `[xangi] Event polling disabled: claude not found (${eventConfig.claudePath ?? 'PATH'}). Set EVENT_CLAUDE_PATH`
       );
+      slackIssueUnavailable = `claude が見つからないため、issue からの起動を止めています（${eventConfig.claudePath ?? 'PATH'}）。EVENT_CLAUDE_PATH を確かめてください`;
     } else if (!tmuxPath) {
       console.error('[xangi] Event polling disabled: tmux not found in PATH');
+      slackIssueUnavailable = 'tmux が PATH に見つからないため、issue からの起動を止めています';
     } else {
       const safeEnv = getSafeEnv();
       eventClaudePath = claudePath;
@@ -1334,6 +1343,7 @@ async function main() {
       // 記録が読めないまま動くと、ラベルの付いた issue をすべて起動し直してしまうので止める
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[xangi] Event polling disabled: ${reason}`);
+      slackIssueUnavailable = `イベントの記録（events.json）を読めないため、issue からの起動を止めています: ${reason}`;
       await notifyEvent(
         `⚠️ イベントの記録を読めないため、GitHub issue からの起動を止めました。ファイルを直して再起動してください\n${reason}`
       ).catch(() => {});
@@ -1467,12 +1477,16 @@ async function main() {
           console.log('[xangi] Slack mentions create GitHub issues');
         } catch (err) {
           // 記録が読めないまま動くと、同じメッセージで issue を立て直してしまうので使わない
-          console.error(
-            `[xangi] Slack mention issues disabled: ${err instanceof Error ? err.message : String(err)}`
-          );
+          const reason = err instanceof Error ? err.message : String(err);
+          console.error(`[xangi] Slack mention issues disabled: ${reason}`);
+          slackIssueUnavailable = `issue を立てた記録（slack-issues.json）を読めません: ${reason}`;
         }
       }
     }
+  }
+  // 理由を書き分けていない失敗でも、「起動の途中」と返し続けない
+  if (!slackIssueCreator && slackIssueUnavailable === slackIssueStarting) {
+    slackIssueUnavailable = 'issue を立てる準備ができませんでした。xangi のログを確かめてください';
   }
   if (config.slack.enabled && eventConfig.wakeChannelId && !eventDispatcher) {
     // 合図のチャンネルの投稿は AI に渡さずに捨てるので、ポーリングしないことを起動時に知らせる
