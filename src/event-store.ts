@@ -3,6 +3,7 @@
  *
  * `DATA_DIR/events.json` に保存する。
  * 一度記録したイベントは、状態にかかわらず二度と受け付けない（同じ issue で 2 回起動しない）。
+ * 例外は 2 つ。needs_info はタイトルか本文が変わったら、done は `xangi-run-at` の日時が変わったら積み直す。
  *
  * Why: xangi の再起動をまたいでも二重起動しないよう、状態はファイルに残す。
  * 起動中（running）のイベントは tmux のセッション名を持ち、セッションがなくなったら終了とみなす。
@@ -12,6 +13,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { dirname } from 'path';
+import { parseRunAt } from './run-at.js';
 
 export interface AgentEvent {
   /** イベント源の名前（例: github-issue） */
@@ -42,6 +44,17 @@ export interface EventRecord {
   error?: string;
   /** 起動した tmux のセッション名（running のとき） */
   sessionName?: string;
+  /**
+   * 積んだときの本文の `xangi-run-at` の日時（ISO 8601）。行がなかった・読めなかったら null
+   * done の issue で日時が変わったかを比べるのに使う。この欄がない古い記録は undefined
+   */
+  runAt?: string | null;
+}
+
+/** 本文の `xangi-run-at` の日時を、記録に残す形にする */
+function recordedRunAt(body: string): string | null {
+  const runAt = parseRunAt(body);
+  return runAt.kind === 'valid' ? runAt.at.toISOString() : null;
 }
 
 export class EventStore {
@@ -88,7 +101,13 @@ export class EventStore {
   enqueue(event: AgentEvent): boolean {
     if (this.has(event)) return false;
     const now = new Date().toISOString();
-    this.records.set(this.key(event), { event, status: 'queued', receivedAt: now, updatedAt: now });
+    this.records.set(this.key(event), {
+      event,
+      status: 'queued',
+      receivedAt: now,
+      updatedAt: now,
+      runAt: recordedRunAt(event.body),
+    });
     this.save();
     return true;
   }
@@ -102,7 +121,41 @@ export class EventStore {
     if (!record || record.status !== 'needs_info') return false;
     if (record.event.title === event.title && record.event.body === event.body) return false;
     record.event = event;
+    record.runAt = recordedRunAt(event.body);
     this.setStatus(event, 'queued');
+    return true;
+  }
+
+  /**
+   * done のイベントの本文の `xangi-run-at` が、積んだときの日時から変わっていたら、新しい内容でキューに積み直す
+   * 日時を過ぎたかは呼ぶ側で確かめる。行がない・読めないときは積み直さない（本文を直しただけで起動しない）
+   * 日時を持たない古い記録は、今の値を前回の値として残すだけにする（移行した直後にまとめて起動しないため）
+   * キューの順番は、積み直した時刻で決める（何週間も前に受け付けた issue が、待っている issue を追い越さないため）
+   * 積み直したら true
+   */
+  requeueIfRunAtChanged(event: AgentEvent): boolean {
+    const record = this.records.get(this.key(event));
+    if (!record || record.status !== 'done') return false;
+    if (this.adoptLegacyRunAt(event)) return false;
+    const current = recordedRunAt(event.body);
+    if (current === null || current === record.runAt) return false;
+    record.event = event;
+    record.runAt = current;
+    record.receivedAt = new Date().toISOString();
+    this.setStatus(event, 'queued');
+    return true;
+  }
+
+  /**
+   * 日時を持たない古い記録に、今の本文の日時を前回の値として残す。残したら true
+   * 日時がまだ先の issue でも残す。呼ぶ側は、日時を過ぎたかを確かめる前に呼ぶ
+   * （過ぎてから残すと、更新後に書き換えた日時が前回の値になり、起動しない）
+   */
+  adoptLegacyRunAt(event: AgentEvent): boolean {
+    const record = this.records.get(this.key(event));
+    if (!record || record.runAt !== undefined) return false;
+    record.runAt = recordedRunAt(event.body);
+    this.save();
     return true;
   }
 

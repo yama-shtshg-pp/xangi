@@ -146,6 +146,19 @@ describe('sendRunAtDigest', () => {
     expect(send.mock.calls[0][0]).not.toContain('o/r#1');
   });
 
+  it('一度起動して done になった issue も、次の日時を待っていれば載る', async () => {
+    // 一覧は fetch で取り直した issue だけで作り、EventStore の記録（done かどうか）を受け取らない
+    // 起動後に日時を書き換えた本文が、そのまま一覧に載ることを確かめる
+    const send = vi.fn(async () => {});
+    await sendRunAtDigest({
+      fetch: fetched([issue(1, '確認できなかったので次へ\nxangi-run-at: 2026-11-23')]),
+      send,
+      now: () => NOW,
+    });
+    expect(send.mock.calls[0][0]).toContain('2026-11-23（月）09:00');
+    expect(send.mock.calls[0][0]).toContain('|issue 1> r#1');
+  });
+
   it('一覧がなければ送らない', async () => {
     const send = vi.fn(async () => {});
     const sent = await sendRunAtDigest({

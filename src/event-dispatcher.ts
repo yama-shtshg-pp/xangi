@@ -267,11 +267,16 @@ export class EventDispatcher {
           continue;
         }
         for (const event of events) {
+          this.options.store.adoptLegacyRunAt(event);
           if (!this.isRunAtReached(event)) continue;
           if (this.options.store.enqueue(event)) {
             console.log(`[event-dispatcher] Queued ${event.source}:${event.id}`);
           } else if (this.options.store.requeueIfUpdated(event)) {
             console.log(`[event-dispatcher] Requeued updated ${event.source}:${event.id}`);
+          } else if (this.options.store.requeueIfRunAtChanged(event)) {
+            console.log(
+              `[event-dispatcher] Requeued rescheduled ${event.source}:${event.id} (xangi-run-at changed)`
+            );
           }
         }
       }
@@ -371,7 +376,9 @@ export class EventDispatcher {
 
   private async launch(record: EventRecord): Promise<void> {
     const { event } = record;
-    if (await this.holdIfNotReady(event)) return;
+    // 一度起動した issue（xangi-run-at の書き換えで積み直したもの）は、作業を始められるかを判定し直さない
+    // 判定し直すと、日時を変えただけの issue に「内容が足りない」とコメントすることがある
+    if (!record.sessionName && (await this.holdIfNotReady(event))) return;
     console.log(`[event-dispatcher] Launching ${event.source}:${event.id}`);
     let result: LaunchResult;
     try {
