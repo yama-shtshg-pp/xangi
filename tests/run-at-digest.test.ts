@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { AgentEvent } from '../src/event-store.js';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { EventStore, type AgentEvent } from '../src/event-store.js';
 import { buildRunAtDigest, formatJst, sendRunAtDigest } from '../src/run-at-digest.js';
 
 function issue(n: number, body: string, title = `issue ${n}`): AgentEvent {
@@ -144,6 +147,27 @@ describe('sendRunAtDigest', () => {
     expect(send).toHaveBeenCalledOnce();
     expect(send.mock.calls[0][0]).toContain('|issue 1> r#1');
     expect(send.mock.calls[0][0]).not.toContain('o/r#1');
+  });
+
+  it('一度起動して done になった issue も、次の日時を待っていれば載る', async () => {
+    // 一覧は取り直した issue だけで作り、EventStore の記録は見ない
+    const dir = mkdtempSync(join(tmpdir(), 'run-at-digest-'));
+    try {
+      const store = new EventStore(join(dir, 'events.json'));
+      store.enqueue(issue(1, 'xangi-run-at: 2026-11-10'));
+      store.setStatus(issue(1, ''), 'done');
+      const send = vi.fn(async () => {});
+      await sendRunAtDigest({
+        fetch: fetched([issue(1, 'xangi-run-at: 2026-11-23')]),
+        send,
+        now: () => NOW,
+      });
+      expect(store.countByStatus('done')).toBe(1);
+      expect(send.mock.calls[0][0]).toContain('2026-11-23（月）09:00');
+      expect(send.mock.calls[0][0]).toContain('|issue 1> r#1');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('一覧がなければ送らない', async () => {

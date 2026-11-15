@@ -127,6 +127,98 @@ describe('EventStore', () => {
     expect(store.requeueIfUpdated(makeEvent('o/r#2'))).toBe(false);
   });
 
+  describe('done のイベントの xangi-run-at の書き換え', () => {
+    const withRunAt = (value: string): AgentEvent => ({
+      ...makeEvent('o/r#1'),
+      body: `本文\nxangi-run-at: ${value}`,
+    });
+
+    it('積んだときの日時を記録し、読み直しても残る。行がなければ null', () => {
+      const store = new EventStore(path);
+      store.enqueue(withRunAt('2026-11-10'));
+      store.enqueue(makeEvent('o/r#2'));
+      const reloaded = new EventStore(path);
+      const [first, second] = reloaded.listByStatus('queued');
+      expect(first.runAt).toBe('2026-11-10T00:00:00.000Z');
+      expect(second.runAt).toBeNull();
+    });
+
+    it('日時が変わったら、新しい内容でキューに積み直し、新しい日時を記録する', () => {
+      const store = new EventStore(path);
+      store.enqueue(withRunAt('2026-11-10'));
+      store.setStatus(makeEvent('o/r#1'), 'done');
+      expect(store.requeueIfRunAtChanged(withRunAt('2026-11-17T14:00'))).toBe(true);
+      const record = new EventStore(path).nextQueued();
+      expect(record?.event.body).toContain('2026-11-17T14:00');
+      expect(record?.runAt).toBe('2026-11-17T05:00:00.000Z');
+    });
+
+    it('同じ日時・行がない・読めない値なら積み直さない', () => {
+      const store = new EventStore(path);
+      store.enqueue(withRunAt('2026-11-10'));
+      store.setStatus(makeEvent('o/r#1'), 'done');
+      expect(store.requeueIfRunAtChanged(withRunAt('2026-11-10T09:00'))).toBe(false);
+      expect(store.requeueIfRunAtChanged({ ...makeEvent('o/r#1'), body: '直した' })).toBe(false);
+      expect(store.requeueIfRunAtChanged(withRunAt('2026/11/17'))).toBe(false);
+      expect(store.countByStatus('done')).toBe(1);
+      // 行を消しても、前回の日時は残す（もう一度同じ日時を書いても起動しない）
+      expect(store.requeueIfRunAtChanged(withRunAt('2026-11-10'))).toBe(false);
+    });
+
+    it.each(['queued', 'running', 'failed', 'interrupted', 'needs_info'] as const)(
+      '%s のイベントは日時が変わっても積み直さない',
+      (status) => {
+        const store = new EventStore(path);
+        store.enqueue(withRunAt('2026-11-10'));
+        store.setStatus(makeEvent('o/r#1'), status);
+        expect(store.requeueIfRunAtChanged(withRunAt('2026-11-17'))).toBe(false);
+        expect(store.listByStatus(status)[0].runAt).toBe('2026-11-10T00:00:00.000Z');
+      }
+    );
+
+    it('記録のないイベントは積み直さない', () => {
+      expect(new EventStore(path).requeueIfRunAtChanged(withRunAt('2026-11-17'))).toBe(false);
+    });
+
+    it('needs_info を積み直したときも、新しい本文の日時を記録する', () => {
+      const store = new EventStore(path);
+      store.enqueue(makeEvent('o/r#1'));
+      store.setStatus(makeEvent('o/r#1'), 'needs_info');
+      expect(store.requeueIfUpdated(withRunAt('2026-11-17'))).toBe(true);
+      expect(store.nextQueued()?.runAt).toBe('2026-11-17T00:00:00.000Z');
+    });
+
+    it('日時を持たない古い記録は、今の値を前回の値として残し、その値では起動しない', () => {
+      const old = {
+        event: makeEvent('o/r#1'),
+        status: 'done',
+        receivedAt: '2026-11-01T00:00:00.000Z',
+        updatedAt: '2026-11-01T00:00:00.000Z',
+        sessionName: 'cc-r-issue1',
+      };
+      writeFileSync(path, JSON.stringify({ records: [old] }));
+      const store = new EventStore(path);
+      expect(store.requeueIfRunAtChanged(withRunAt('2026-11-10'))).toBe(false);
+      expect(new EventStore(path).listByStatus('done')[0].runAt).toBe('2026-11-10T00:00:00.000Z');
+      // そのあと書き換えれば積み直す
+      expect(store.requeueIfRunAtChanged(withRunAt('2026-11-17'))).toBe(true);
+    });
+
+    it('日時を持たない古い記録で行がなければ null を残し、あとから書いた日時で積み直す', () => {
+      const old = {
+        event: makeEvent('o/r#1'),
+        status: 'done',
+        receivedAt: '2026-11-01T00:00:00.000Z',
+        updatedAt: '2026-11-01T00:00:00.000Z',
+      };
+      writeFileSync(path, JSON.stringify({ records: [old] }));
+      const store = new EventStore(path);
+      expect(store.requeueIfRunAtChanged(makeEvent('o/r#1'))).toBe(false);
+      expect(store.listByStatus('done')[0].runAt).toBeNull();
+      expect(store.requeueIfRunAtChanged(withRunAt('2026-11-10'))).toBe(true);
+    });
+  });
+
   it('壊れたファイルは空から始めずに例外を投げ、ファイルには触らない', () => {
     writeFileSync(path, '{broken');
     expect(() => new EventStore(path)).toThrow(/Failed to read/);

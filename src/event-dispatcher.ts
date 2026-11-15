@@ -272,6 +272,10 @@ export class EventDispatcher {
             console.log(`[event-dispatcher] Queued ${event.source}:${event.id}`);
           } else if (this.options.store.requeueIfUpdated(event)) {
             console.log(`[event-dispatcher] Requeued updated ${event.source}:${event.id}`);
+          } else if (this.options.store.requeueIfRunAtChanged(event)) {
+            console.log(
+              `[event-dispatcher] Requeued rescheduled ${event.source}:${event.id} (xangi-run-at changed)`
+            );
           }
         }
       }
