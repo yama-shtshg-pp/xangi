@@ -153,6 +153,19 @@ describe('EventStore', () => {
       expect(record?.runAt).toBe('2026-11-17T05:00:00.000Z');
     });
 
+    it('積み直したイベントは、積み直した時刻でキューに並ぶ', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-11-01T00:00:00Z'));
+      const store = new EventStore(path);
+      store.enqueue(withRunAt('2026-11-10'));
+      store.setStatus(makeEvent('o/r#1'), 'done');
+      vi.setSystemTime(new Date('2026-11-16T00:00:00Z'));
+      store.enqueue(makeEvent('o/r#2'));
+      vi.setSystemTime(new Date('2026-11-17T00:00:00Z'));
+      store.requeueIfRunAtChanged(withRunAt('2026-11-17'));
+      expect(store.nextQueued()?.event.id).toBe('o/r#2');
+    });
+
     it('同じ日時・行がない・読めない値なら積み直さない', () => {
       const store = new EventStore(path);
       store.enqueue(withRunAt('2026-11-10'));

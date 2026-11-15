@@ -405,6 +405,47 @@ describe('EventDispatcher', () => {
         expect(launch).toHaveBeenCalledTimes(1);
       });
 
+      it('起動し直すときは、作業を始められるかを判定し直さない', async () => {
+        const checkReadiness = vi.fn(async () => ({ notReady: false }));
+        events = [withRunAt(1, '2026-11-10')];
+        const dispatcher = makeDispatcher({
+          now: () => new Date('2026-11-20T00:00:00Z'),
+          checkReadiness,
+        });
+        await dispatcher.poll();
+        expect(checkReadiness).toHaveBeenCalledTimes(1);
+        finish(1);
+        await dispatcher.poll();
+
+        checkReadiness.mockResolvedValue({ notReady: true, missing: '目的' } as never);
+        events = [withRunAt(1, '2026-11-17')];
+        await dispatcher.poll();
+        expect(checkReadiness).toHaveBeenCalledTimes(1);
+        expect(launch).toHaveBeenCalledTimes(2);
+        expect(store.listByStatus('needs_info')).toHaveLength(0);
+      });
+
+      it('古い記録は、更新後に未来の日時へ書き換えれば、その日時に起動する', async () => {
+        const event = withRunAt(1, '2026-11-10');
+        store.enqueue(event);
+        store.setRunning(event, 'cc-a-issue1');
+        store.setStatus(event, 'done');
+        // runAt を持たない古い記録にする
+        delete (store.listByStatus('done')[0] as { runAt?: unknown }).runAt;
+
+        events = [event];
+        let now = new Date('2026-11-15T00:00:00Z');
+        const dispatcher = makeDispatcher({ now: () => now });
+        await dispatcher.poll(); // 更新後の最初のポーリング。今の値（11-10）を前回の値にする
+        expect(launch).not.toHaveBeenCalled();
+
+        events = [withRunAt(1, '2026-11-20')];
+        await dispatcher.poll();
+        now = new Date('2026-11-20T00:00:00Z');
+        await dispatcher.poll();
+        expect(launch).toHaveBeenCalledTimes(1);
+      });
+
       it('行のない issue でも、あとから過ぎた日時を書けば起動し直す', async () => {
         events = [makeEvent(1)];
         const dispatcher = makeDispatcher({ now: () => new Date('2026-11-20T00:00:00Z') });

@@ -130,21 +130,32 @@ export class EventStore {
    * done のイベントの本文の `xangi-run-at` が、積んだときの日時から変わっていたら、新しい内容でキューに積み直す
    * 日時を過ぎたかは呼ぶ側で確かめる。行がない・読めないときは積み直さない（本文を直しただけで起動しない）
    * 日時を持たない古い記録は、今の値を前回の値として残すだけにする（移行した直後にまとめて起動しないため）
+   * キューの順番は、積み直した時刻で決める（何週間も前に受け付けた issue が、待っている issue を追い越さないため）
    * 積み直したら true
    */
   requeueIfRunAtChanged(event: AgentEvent): boolean {
     const record = this.records.get(this.key(event));
     if (!record || record.status !== 'done') return false;
+    if (this.adoptLegacyRunAt(event)) return false;
     const current = recordedRunAt(event.body);
-    if (record.runAt === undefined) {
-      record.runAt = current;
-      this.save();
-      return false;
-    }
     if (current === null || current === record.runAt) return false;
     record.event = event;
     record.runAt = current;
+    record.receivedAt = new Date().toISOString();
     this.setStatus(event, 'queued');
+    return true;
+  }
+
+  /**
+   * 日時を持たない古い記録に、今の本文の日時を前回の値として残す。残したら true
+   * 日時がまだ先の issue でも残す。呼ぶ側は、日時を過ぎたかを確かめる前に呼ぶ
+   * （過ぎてから残すと、更新後に書き換えた日時が前回の値になり、起動しない）
+   */
+  adoptLegacyRunAt(event: AgentEvent): boolean {
+    const record = this.records.get(this.key(event));
+    if (!record || record.runAt !== undefined) return false;
+    record.runAt = recordedRunAt(event.body);
+    this.save();
     return true;
   }
 
