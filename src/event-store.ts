@@ -97,6 +97,11 @@ export class EventStore {
     return this.records.has(this.key(event));
   }
 
+  /** 記録の状態。記録がなければ undefined */
+  statusOf(event: Pick<AgentEvent, 'source' | 'id'>): EventStatus | undefined {
+    return this.records.get(this.key(event))?.status;
+  }
+
   /** 新しいイベントをキューに積む。記録済みなら false */
   enqueue(event: AgentEvent): boolean {
     if (this.has(event)) return false;

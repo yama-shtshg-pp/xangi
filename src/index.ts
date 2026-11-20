@@ -1433,6 +1433,20 @@ async function main() {
         comment: async (event, message) => {
           await defaultGhExec(['issue', 'comment', event.url, '--body', message]);
         },
+        getIssueState: async (issue) => {
+          const stdout = await defaultGhExec([
+            'issue',
+            'view',
+            String(issue.number),
+            '--repo',
+            issue.repo,
+            '--json',
+            'state,stateReason',
+          ]);
+          const parsed = JSON.parse(stdout) as { state?: string; stateReason?: string };
+          if (!parsed.state) throw new Error('gh returned no state');
+          return { state: parsed.state, stateReason: parsed.stateReason ?? '' };
+        },
       });
       // 初回のポーリング（gh の呼び出し）で起動処理を待たせない
       eventDispatcher.start(eventConfig.pollIntervalMs).catch((err) => {
