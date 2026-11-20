@@ -19,6 +19,13 @@ import type { EventSource } from './event-source-github.js';
 import type { AgentEvent, EventRecord, EventStore } from './event-store.js';
 import type { ReadinessVerdict } from './issue-readiness.js';
 import { parseRunAt } from './run-at.js';
+import {
+  issueKey,
+  issueProgress,
+  parseRunAfter,
+  type IssueRef,
+  type IssueState,
+} from './run-after.js';
 import type { SessionActivity } from './tmux-launcher.js';
 
 export interface EventConfig {
@@ -185,6 +192,11 @@ export interface EventDispatcherOptions {
   wakeDelayMs?: number;
   /** 本文の起動日時と比べる現在時刻（テストで差し替える） */
   now?: () => Date;
+  /**
+   * 本文の `xangi-run-after` に書いた issue の状態を取る
+   * 未指定のとき、行のある issue は確かめようがないので起動しない
+   */
+  getIssueState?: (issue: IssueRef) => Promise<IssueState>;
 }
 
 /** GitHub アプリは 1 つの操作で複数の投稿をすることがあるので、少し待ってまとめる */
@@ -208,6 +220,15 @@ export class EventDispatcher {
   private stopped = false;
   /** 起動日時を読めないと警告済みの issue と値（同じ値で毎回ログを出さない） */
   private invalidRunAtWarned = new Map<string, string>();
+  /** `xangi-run-after` について警告済みの issue と内容（同じ内容で毎回ログを出さない） */
+  private runAfterWarned = new Map<string, string>();
+  /** not planned などで閉じたと通知済みの組（待っている issue -> 待たれている issue） */
+  private notCompletedNotified = new Set<string>();
+  /**
+   * completed で閉じたと確かめた issue。毎回 gh で確かめない
+   * 閉じたあとに reopen されても、xangi を再起動するまで閉じたものとみなす
+   */
+  private completedIssues = new Set<string>();
 
   constructor(private options: EventDispatcherOptions) {}
 
@@ -269,6 +290,15 @@ export class EventDispatcher {
         for (const event of events) {
           this.options.store.adoptLegacyRunAt(event);
           if (!this.isRunAtReached(event)) continue;
+          // 一度積んだ issue は待つ issue を確かめ直さない（起動済みの issue に「起動しません」と知らせないため）
+          // needs_info は起動していないので、本文を直して積み直すときにも確かめる
+          const status = this.options.store.statusOf(event);
+          if (
+            (status === undefined || status === 'needs_info') &&
+            !(await this.isRunAfterReached(event))
+          ) {
+            continue;
+          }
           if (this.options.store.enqueue(event)) {
             console.log(`[event-dispatcher] Queued ${event.source}:${event.id}`);
           } else if (this.options.store.requeueIfUpdated(event)) {
@@ -310,6 +340,84 @@ export class EventDispatcher {
     this.invalidRunAtWarned.delete(key);
     if (runAt.kind === 'none') return true;
     return runAt.at.getTime() <= (this.options.now?.() ?? new Date()).getTime();
+  }
+
+  /**
+   * 本文の `xangi-run-after` に書いた issue が、すべて completed で閉じたか（行がなければ true）
+   * 終わっていないあいだは記録しない（`xangi-run-at` の日時前と同じ）
+   * 読めない値や、状態を取れない issue があるときは、早く起動しないよう起動しない
+   */
+  private async isRunAfterReached(event: AgentEvent): Promise<boolean> {
+    const key = `${event.source}:${event.id}`;
+    const runAfter = parseRunAfter(event.body, event.id.replace(/#\d+$/, ''));
+    if (runAfter.kind === 'none') {
+      this.runAfterWarned.delete(key);
+      return true;
+    }
+    if (runAfter.kind === 'invalid') {
+      this.warnRunAfter(
+        key,
+        `invalid:${runAfter.value}`,
+        `Invalid xangi-run-after "${runAfter.value}" in ${key}. Not launching (use #12 or owner/repo#12, separated by commas)`
+      );
+      return false;
+    }
+    const getIssueState = this.options.getIssueState;
+    if (!getIssueState) {
+      this.warnRunAfter(
+        key,
+        'unsupported',
+        `xangi-run-after in ${key} cannot be checked. Not launching`
+      );
+      return false;
+    }
+    for (const issue of runAfter.issues) {
+      const depKey = issueKey(issue);
+      if (this.completedIssues.has(depKey)) continue;
+      const pairKey = `${key}->${depKey}`;
+      let state: IssueState;
+      try {
+        state = await getIssueState(issue);
+      } catch (err) {
+        this.warnRunAfter(
+          key,
+          `error:${depKey}`,
+          `Failed to get state of ${issue.repo}#${issue.number} (xangi-run-after in ${key}). Not launching: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return false;
+      }
+      const progress = issueProgress(state);
+      if (progress === 'completed') {
+        this.completedIssues.add(depKey);
+        this.notCompletedNotified.delete(pairKey);
+        continue;
+      }
+      this.runAfterWarned.delete(key);
+      if (progress === 'open') {
+        // 開き直したら、また閉じたときに知らせる
+        this.notCompletedNotified.delete(pairKey);
+        return false;
+      }
+      if (!this.notCompletedNotified.has(pairKey)) {
+        this.notCompletedNotified.add(pairKey);
+        console.log(
+          `[event-dispatcher] ${issue.repo}#${issue.number} closed as ${state.stateReason} (xangi-run-after in ${key}). Not launching`
+        );
+        await this.safeNotify(
+          `⏸️ 待っている ${issue.repo}#${issue.number} が完了以外（${state.stateReason}）で閉じられたため、起動しません: ${event.id} ${event.title}\n${event.url}\n起動するときは \`xangi-run-after\` の行を直してください`,
+          event.notifyChannelId
+        );
+      }
+      return false;
+    }
+    this.runAfterWarned.delete(key);
+    return true;
+  }
+
+  private warnRunAfter(key: string, reason: string, message: string): void {
+    if (this.runAfterWarned.get(key) === reason) return;
+    this.runAfterWarned.set(key, reason);
+    console.warn(`[event-dispatcher] ${message}`);
   }
 
   /** 起動中のイベントのセッションがなくなっていたら終了にする */

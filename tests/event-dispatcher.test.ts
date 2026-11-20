@@ -12,6 +12,7 @@ import {
 import { EventStore, type AgentEvent } from '../src/event-store.js';
 import type { EventSource } from '../src/event-source-github.js';
 import type { SessionActivity } from '../src/tmux-launcher.js';
+import type { IssueRef, IssueState } from '../src/run-after.js';
 
 function makeEvent(n: number): AgentEvent {
   return {
@@ -456,6 +457,146 @@ describe('EventDispatcher', () => {
         await dispatcher.poll();
         expect(launch).toHaveBeenCalledTimes(2);
       });
+    });
+  });
+
+  describe('本文の xangi-run-after', () => {
+    /** 待たれている issue の状態（キーは owner/repo#番号） */
+    let states: Map<string, IssueState | Error>;
+    let getIssueState: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      states = new Map();
+      getIssueState = vi.fn(async (issue: IssueRef) => {
+        const state = states.get(`${issue.repo}#${issue.number}`);
+        if (state instanceof Error) throw state;
+        if (!state) throw new Error('not found');
+        return state;
+      });
+    });
+
+    const withRunAfter = (n: number, line: string): AgentEvent => ({
+      ...makeEvent(n),
+      body: `本文\n${line}`,
+    });
+    const open: IssueState = { state: 'OPEN', stateReason: '' };
+    const completed: IssueState = { state: 'CLOSED', stateReason: 'COMPLETED' };
+    const notPlanned: IssueState = { state: 'CLOSED', stateReason: 'NOT_PLANNED' };
+
+    it('待つ issue がすべて completed で閉じるまで積まず、閉じたあとのポーリングで起動する', async () => {
+      events = [withRunAfter(3, 'xangi-run-after: #1, other/b#2')];
+      states.set('o/a#1', completed);
+      states.set('other/b#2', open);
+      const dispatcher = makeDispatcher({ getIssueState });
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(store.has(events[0])).toBe(false);
+
+      states.set('other/b#2', completed);
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      // completed と確かめた #1 は 2 回目のポーリングで gh を呼ばない
+      const calls = getIssueState.mock.calls.map((c) => `${c[0].repo}#${c[0].number}`);
+      expect(calls).toEqual(['o/a#1', 'other/b#2', 'other/b#2']);
+    });
+
+    it('待っている issue があっても、後続の issue は待たせない', async () => {
+      events = [withRunAfter(2, 'xangi-run-after: #1'), makeEvent(3)];
+      states.set('o/a#1', open);
+      await makeDispatcher({ getIssueState }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][1].id).toBe('o/a#3');
+    });
+
+    it('not planned で閉じたら起動せず、通知は 1 回だけ。開き直して閉じたら、また知らせる', async () => {
+      events = [withRunAfter(2, 'xangi-run-after: #1')];
+      states.set('o/a#1', notPlanned);
+      const dispatcher = makeDispatcher({ getIssueState });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(messages()).toHaveLength(1);
+      expect(messages()[0]).toContain('o/a#1');
+      expect(messages()[0]).toContain('NOT_PLANNED');
+
+      states.set('o/a#1', open);
+      await dispatcher.poll();
+      states.set('o/a#1', notPlanned);
+      await dispatcher.poll();
+      expect(messages()).toHaveLength(2);
+    });
+
+    it('状態を取れないときは起動せず、警告は 1 回だけ出す', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      events = [withRunAfter(2, 'xangi-run-after: #1')];
+      states.set('o/a#1', new Error('Could not resolve to an issue'));
+      const dispatcher = makeDispatcher({ getIssueState });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('Could not resolve to an issue');
+    });
+
+    it('読めない値なら gh を呼ばずに起動せず、警告は 1 回だけ。直したら起動する', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      events = [withRunAfter(2, 'xangi-run-after: 1')];
+      states.set('o/a#1', completed);
+      const dispatcher = makeDispatcher({ getIssueState });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(getIssueState).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      events = [withRunAfter(2, 'xangi-run-after: #1')];
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('起動済みの issue は、待つ issue が not planned になっても確かめ直さず、知らせない', async () => {
+      events = [withRunAfter(2, 'xangi-run-after: #1')];
+      states.set('o/a#1', completed);
+      const dispatcher = makeDispatcher({ getIssueState });
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      notify.mockClear();
+      getIssueState.mockClear();
+
+      alive.clear();
+      states.set('o/a#1', notPlanned);
+      await dispatcher.poll(); // done になる
+      // xangi の再起動と同じく、completed のキャッシュを持たない dispatcher で確かめる
+      await makeDispatcher({ getIssueState }).poll();
+      expect(getIssueState).not.toHaveBeenCalled();
+      expect(messages().some((m) => m.includes('起動しません'))).toBe(false);
+    });
+
+    it('状態を取る関数がなければ起動しない', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      events = [withRunAfter(2, 'xangi-run-after: #1')];
+      await makeDispatcher().poll();
+      expect(launch).not.toHaveBeenCalled();
+    });
+
+    it('xangi-run-at と両方あれば、両方の条件を満たしてから起動する', async () => {
+      events = [withRunAfter(2, 'xangi-run-after: #1\nxangi-run-at: 2026-11-20')];
+      states.set('o/a#1', completed);
+      let now = new Date('2026-11-19T00:00:00Z');
+      const dispatcher = makeDispatcher({ getIssueState, now: () => now });
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      // 日時前は gh を呼ばない
+      expect(getIssueState).not.toHaveBeenCalled();
+
+      now = new Date('2026-11-20T00:00:00Z');
+      states.set('o/a#1', open);
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+
+      states.set('o/a#1', completed);
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
     });
   });
 
