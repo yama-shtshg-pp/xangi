@@ -572,6 +572,29 @@ describe('EventDispatcher', () => {
       expect(messages().some((m) => m.includes('起動しません'))).toBe(false);
     });
 
+    it('同じ issue を複数の issue が待っていても、1 回のポーリングで gh を呼ぶのは 1 回だけ', async () => {
+      events = [withRunAfter(2, 'xangi-run-after: #1'), withRunAfter(3, 'xangi-run-after: #1')];
+      states.set('o/a#1', open);
+      const dispatcher = makeDispatcher({ getIssueState });
+      await dispatcher.poll();
+      expect(getIssueState).toHaveBeenCalledTimes(1);
+      await dispatcher.poll();
+      expect(getIssueState).toHaveBeenCalledTimes(2);
+    });
+
+    it('PR（MERGED）や自分の番号を書いたら起動せず、警告は 1 回だけ出す', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      events = [withRunAfter(2, 'xangi-run-after: #1'), withRunAfter(3, 'xangi-run-after: #3')];
+      states.set('o/a#1', { state: 'MERGED', stateReason: '' });
+      const dispatcher = makeDispatcher({ getIssueState });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls[0][0]).toContain('MERGED');
+      expect(warn.mock.calls[1][0]).toContain('refers to itself');
+    });
+
     it('状態を取る関数がなければ起動しない', async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       events = [withRunAfter(2, 'xangi-run-after: #1')];

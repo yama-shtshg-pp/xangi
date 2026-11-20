@@ -229,6 +229,8 @@ export class EventDispatcher {
    * 閉じたあとに reopen されても、xangi を再起動するまで閉じたものとみなす
    */
   private completedIssues = new Set<string>();
+  /** このポーリングで取った、待たれている issue の状態（ポーリングのたびに捨てる） */
+  private pollIssueStates = new Map<string, Promise<IssueState>>();
 
   constructor(private options: EventDispatcherOptions) {}
 
@@ -277,6 +279,7 @@ export class EventDispatcher {
     this.polling = true;
     try {
       await this.checkRunning();
+      this.pollIssueStates.clear();
       for (const source of this.options.sources) {
         let events: AgentEvent[];
         try {
@@ -374,10 +377,21 @@ export class EventDispatcher {
     for (const issue of runAfter.issues) {
       const depKey = issueKey(issue);
       if (this.completedIssues.has(depKey)) continue;
+      if (depKey === event.id.toLowerCase()) {
+        // 自分を待つと、open のあいだ（ポーリングの対象であるあいだ）は起動しない
+        this.warnRunAfter(key, 'self', `xangi-run-after in ${key} refers to itself. Not launching`);
+        return false;
+      }
       const pairKey = `${key}->${depKey}`;
       let state: IssueState;
       try {
-        state = await getIssueState(issue);
+        // 同じ issue を複数の issue が待っていても、1 回のポーリングで gh を呼ぶのは 1 回だけにする
+        let pending = this.pollIssueStates.get(depKey);
+        if (!pending) {
+          pending = getIssueState(issue);
+          this.pollIssueStates.set(depKey, pending);
+        }
+        state = await pending;
       } catch (err) {
         this.warnRunAfter(
           key,
@@ -391,6 +405,14 @@ export class EventDispatcher {
         this.completedIssues.add(depKey);
         this.notCompletedNotified.delete(pairKey);
         continue;
+      }
+      if (progress === 'unknown') {
+        this.warnRunAfter(
+          key,
+          `unknown:${depKey}:${state.state}`,
+          `${issue.repo}#${issue.number} has state ${state.state} (xangi-run-after in ${key}). Not launching (pull requests are not supported)`
+        );
+        return false;
       }
       this.runAfterWarned.delete(key);
       if (progress === 'open') {

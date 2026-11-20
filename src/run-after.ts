@@ -60,14 +60,17 @@ export interface IssueState {
   stateReason: string;
 }
 
-export type IssueProgress = 'open' | 'completed' | 'not_completed';
+export type IssueProgress = 'open' | 'completed' | 'not_completed' | 'unknown';
 
 /**
  * 待つ issue が終わったか
  * completed で閉じたときだけ終わったとみなす。not planned や duplicate は、後続を始めてよいか分からない
+ * OPEN と CLOSED 以外（PR の MERGED など）は unknown。黙って待ち続けないよう、呼ぶ側で警告する
  */
 export function issueProgress(state: IssueState): IssueProgress {
-  if (state.state.toUpperCase() !== 'CLOSED') return 'open';
+  const s = state.state.toUpperCase();
+  if (s === 'OPEN') return 'open';
+  if (s !== 'CLOSED') return 'unknown';
   const reason = state.stateReason.toUpperCase();
   return reason === 'COMPLETED' || reason === '' ? 'completed' : 'not_completed';
 }

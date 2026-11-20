@@ -51,6 +51,10 @@ describe('issueProgress', () => {
     expect(issueProgress({ state: 'CLOSED', stateReason: '' })).toBe('completed');
   });
 
+  it('OPEN と CLOSED 以外（PR の MERGED など）は unknown', () => {
+    expect(issueProgress({ state: 'MERGED', stateReason: '' })).toBe('unknown');
+  });
+
   it('not planned や duplicate で閉じたら not_completed', () => {
     expect(issueProgress({ state: 'CLOSED', stateReason: 'NOT_PLANNED' })).toBe('not_completed');
     expect(issueProgress({ state: 'CLOSED', stateReason: 'DUPLICATE' })).toBe('not_completed');
