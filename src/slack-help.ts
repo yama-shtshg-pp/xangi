@@ -26,7 +26,7 @@ export function getJevHelpMode(env: NodeJS.ProcessEnv = process.env): JevHelpMod
 }
 
 /**
- * Noul がこれ以上なら、使い方を聞いていると判定する
+ * help の確率（Jev の noul の答え）がこれ以上なら、使い方を聞いていると判定する
  * Why: 誤って早見表を返すと、issue を立てたかった人が issue を立てられず、key 付きで打ち直すことになる。
  * 早見表を返しそびれても、人が `使い方` と打てば出るので、高めにする。
  */
