@@ -328,7 +328,7 @@ describe('EventDispatcher', () => {
 
     it('読めない値なら起動せず、同じ値の警告は 1 回だけ出す', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      events = [withRunAt(1, '2026/11/20')];
+      events = [withRunAt(1, '2026.11.20')];
       const dispatcher = makeDispatcher();
       await dispatcher.poll();
       await dispatcher.poll();

@@ -65,7 +65,7 @@ export function buildRunAtDigest(
   const waiting: { event: AgentEvent; at: Date }[] = [];
   const invalid: { event: AgentEvent; value: string }[] = [];
   for (const event of events) {
-    const runAt = parseRunAt(event.body);
+    const runAt = parseRunAt(event.body, event.createdAt);
     if (runAt.kind === 'valid' && runAt.at.getTime() > now.getTime()) {
       waiting.push({ event, at: runAt.at });
     } else if (runAt.kind === 'invalid') {

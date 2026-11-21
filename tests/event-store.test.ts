@@ -172,7 +172,7 @@ describe('EventStore', () => {
       store.setStatus(makeEvent('o/r#1'), 'done');
       expect(store.requeueIfRunAtChanged(withRunAt('2026-11-10T09:00'))).toBe(false);
       expect(store.requeueIfRunAtChanged({ ...makeEvent('o/r#1'), body: '直した' })).toBe(false);
-      expect(store.requeueIfRunAtChanged(withRunAt('2026/11/17'))).toBe(false);
+      expect(store.requeueIfRunAtChanged(withRunAt('2026.11.17'))).toBe(false);
       expect(store.countByStatus('done')).toBe(1);
       // 行を消しても、前回の日時は残す（もう一度同じ日時を書いても起動しない）
       expect(store.requeueIfRunAtChanged(withRunAt('2026-11-10'))).toBe(false);

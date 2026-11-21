@@ -30,7 +30,7 @@ describe('parseRunAfter', () => {
     expect(parseRunAfter('メモ xangi-run-after: #1', 'o/a')).toEqual({ kind: 'none' });
   });
 
-  it.each(['', '12', '#abc', '#1,', '#1 #2', 'o#1', 'https://github.com/o/a/pull/1'])(
+  it.each(['', '12', '#abc', '#1,', '#1 #2', 'o/#1', 'https://github.com/o/a/pull/1'])(
     '読めない値 "%s" なら invalid',
     (value) => {
       expect(parseRunAfter(`xangi-run-after: ${value}`, 'o/a')).toEqual({

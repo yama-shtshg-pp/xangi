@@ -16,13 +16,14 @@
  */
 import { cpus, loadavg } from 'os';
 import type { EventSource } from './event-source-github.js';
-import type { AgentEvent, EventRecord, EventStore } from './event-store.js';
+import type { AgentEvent, EventRecord, EventStore, InvalidSpecKind } from './event-store.js';
 import type { ReadinessVerdict } from './issue-readiness.js';
 import { parseRunAt } from './run-at.js';
 import {
   issueKey,
   issueProgress,
   parseRunAfter,
+  type BlockedByIssue,
   type IssueRef,
   type IssueState,
 } from './run-after.js';
@@ -197,6 +198,40 @@ export interface EventDispatcherOptions {
    * 未指定のとき、行のある issue は確かめようがないので起動しない
    */
   getIssueState?: (issue: IssueRef) => Promise<IssueState>;
+  /**
+   * GitHub の「Blocked by」に指定された issue と、その状態を取る
+   * 未指定なら Blocked by なしとして扱う。失敗したら起動しない
+   */
+  getBlockedBy?: (event: AgentEvent) => Promise<BlockedByIssue[]>;
+}
+
+/** 起動の指定を読めなかったときに、issue に書く説明 */
+const RUN_AT_EXAMPLES = [
+  '`起動: 2026-11-20 14:00`',
+  '`起動: 2026-11-20`（時刻を省くと 9:00）',
+  '`起動: 11/20 14時`（年を省くと、issue を作った日以降で最初に来る日付）',
+];
+const RUN_AFTER_EXAMPLE = '`待つ: #12, repo#3, https://github.com/owner/repo/issues/3`';
+
+function buildInvalidSpecComment(kind: InvalidSpecKind, value: string): string {
+  const lines =
+    kind === 'runAt'
+      ? [
+          `起動日時の行の値「${value}」を読めなかったため、Claude Code を起動していません。`,
+          '',
+          '次のように書き直すと、次の確認で読み直します。',
+          '',
+          ...RUN_AT_EXAMPLES.map((e) => `- ${e}`),
+        ]
+      : [
+          `待つ issue の行の値「${value}」を読めなかったため、Claude Code を起動していません。`,
+          '',
+          '次のように書き直すと、次の確認で読み直します。',
+          '',
+          `- ${RUN_AFTER_EXAMPLE}`,
+          '- PR の URL は書けません。',
+        ];
+  return [...lines, '', '（xangi が判定しました）'].join('\n');
 }
 
 /** GitHub アプリは 1 つの操作で複数の投稿をすることがあるので、少し待ってまとめる */
@@ -292,7 +327,7 @@ export class EventDispatcher {
         }
         for (const event of events) {
           this.options.store.adoptLegacyRunAt(event);
-          if (!this.isRunAtReached(event)) continue;
+          if (!(await this.isRunAtReached(event))) continue;
           // 一度積んだ issue は待つ issue を確かめ直さない（起動済みの issue に「起動しません」と知らせないため）
           // needs_info は起動していないので、本文を直して積み直すときにも確かめる
           const status = this.options.store.statusOf(event);
@@ -328,53 +363,102 @@ export class EventDispatcher {
    * 過ぎていないイベントは記録しない。記録すると、当日のポーリングで積み済みとみなされて起動しなくなる
    * 読めない値は書き間違いとみなし、予定より早く起動しないよう起動しない
    */
-  private isRunAtReached(event: AgentEvent): boolean {
-    const runAt = parseRunAt(event.body);
+  private async isRunAtReached(event: AgentEvent): Promise<boolean> {
+    const runAt = parseRunAt(event.body, event.createdAt);
     const key = `${event.source}:${event.id}`;
     if (runAt.kind === 'invalid') {
       if (this.invalidRunAtWarned.get(key) !== runAt.value) {
         this.invalidRunAtWarned.set(key, runAt.value);
         console.warn(
-          `[event-dispatcher] Invalid xangi-run-at "${runAt.value}" in ${key}. Not launching (use YYYY-MM-DD or YYYY-MM-DDTHH:MM in JST)`
+          `[event-dispatcher] Invalid xangi-run-at "${runAt.value}" in ${key}. Not launching (use YYYY-MM-DD, YYYY-MM-DDTHH:MM, or MM/DD HH時 in JST)`
         );
       }
+      await this.commentInvalidSpec(event, 'runAt', runAt.value);
       return false;
     }
     this.invalidRunAtWarned.delete(key);
+    this.options.store.clearInvalidSpecComment(event, 'runAt');
     if (runAt.kind === 'none') return true;
     return runAt.at.getTime() <= (this.options.now?.() ?? new Date()).getTime();
   }
 
   /**
-   * 本文の `xangi-run-after` に書いた issue が、すべて completed で閉じたか（行がなければ true）
+   * 読めない値を issue にコメントする。同じ issue・同じ種類・同じ値なら 1 回だけ（再起動後も）
+   * 失敗しても処理は続け、記録しないので次のポーリングでもう一度試す
+   */
+  private async commentInvalidSpec(
+    event: AgentEvent,
+    kind: InvalidSpecKind,
+    value: string
+  ): Promise<void> {
+    const { comment, store } = this.options;
+    if (!comment || store.invalidSpecCommented(event, kind) === value) return;
+    try {
+      await comment(event, buildInvalidSpecComment(kind, value));
+    } catch (err) {
+      logError(`comment on ${event.id}`, err);
+      return;
+    }
+    store.recordInvalidSpecComment(event, kind, value);
+  }
+
+  /** 本文の `xangi-run-after` と GitHub の「Blocked by」に書いた issue を、重複なく集める */
+  private async collectDependencies(
+    event: AgentEvent,
+    runAfter: IssueRef[]
+  ): Promise<{ issue: IssueRef; known?: IssueState; viaBlockedBy: boolean }[]> {
+    const blocked = (await this.options.getBlockedBy?.(event)) ?? [];
+    const blockedByKey = new Map(blocked.map((b) => [issueKey(b.issue), b]));
+    const deps = runAfter.map((issue) => {
+      const b = blockedByKey.get(issueKey(issue));
+      blockedByKey.delete(issueKey(issue));
+      return { issue, known: b?.state, viaBlockedBy: b !== undefined };
+    });
+    for (const b of blockedByKey.values()) {
+      deps.push({ issue: b.issue, known: b.state, viaBlockedBy: true });
+    }
+    return deps;
+  }
+
+  /**
+   * 本文の `xangi-run-after`（`待つ`）と GitHub の「Blocked by」に書いた issue が、すべて completed で閉じたか
+   * どちらもなければ true
    * 終わっていないあいだは記録しない（`xangi-run-at` の日時前と同じ）
    * 読めない値や、状態を取れない issue があるときは、早く起動しないよう起動しない
    */
   private async isRunAfterReached(event: AgentEvent): Promise<boolean> {
     const key = `${event.source}:${event.id}`;
     const runAfter = parseRunAfter(event.body, event.id.replace(/#\d+$/, ''));
-    if (runAfter.kind === 'none') {
-      this.runAfterWarned.delete(key);
-      return true;
-    }
     if (runAfter.kind === 'invalid') {
       this.warnRunAfter(
         key,
         `invalid:${runAfter.value}`,
-        `Invalid xangi-run-after "${runAfter.value}" in ${key}. Not launching (use #12 or owner/repo#12, separated by commas)`
+        `Invalid xangi-run-after "${runAfter.value}" in ${key}. Not launching (use #12, repo#12, owner/repo#12 or an issue URL, separated by commas)`
       );
+      await this.commentInvalidSpec(event, 'runAfter', runAfter.value);
       return false;
     }
-    const getIssueState = this.options.getIssueState;
-    if (!getIssueState) {
+    this.options.store.clearInvalidSpecComment(event, 'runAfter');
+    let deps: Awaited<ReturnType<EventDispatcher['collectDependencies']>>;
+    try {
+      deps = await this.collectDependencies(
+        event,
+        runAfter.kind === 'valid' ? runAfter.issues : []
+      );
+    } catch (err) {
       this.warnRunAfter(
         key,
-        'unsupported',
-        `xangi-run-after in ${key} cannot be checked. Not launching`
+        'error:blocked-by',
+        `Failed to get Blocked by of ${key}. Not launching: ${err instanceof Error ? err.message : String(err)}`
       );
       return false;
     }
-    for (const issue of runAfter.issues) {
+    if (deps.length === 0) {
+      this.runAfterWarned.delete(key);
+      return true;
+    }
+    const getIssueState = this.options.getIssueState;
+    for (const { issue, known, viaBlockedBy } of deps) {
       const depKey = issueKey(issue);
       if (this.completedIssues.has(depKey)) continue;
       if (depKey === event.id.toLowerCase()) {
@@ -385,13 +469,26 @@ export class EventDispatcher {
       const pairKey = `${key}->${depKey}`;
       let state: IssueState;
       try {
-        // 同じ issue を複数の issue が待っていても、1 回のポーリングで gh を呼ぶのは 1 回だけにする
-        let pending = this.pollIssueStates.get(depKey);
-        if (!pending) {
-          pending = getIssueState(issue);
-          this.pollIssueStates.set(depKey, pending);
+        if (known) {
+          // Blocked by の応答に状態があるので、gh をもう一度呼ばない
+          state = known;
+        } else {
+          if (!getIssueState) {
+            this.warnRunAfter(
+              key,
+              'unsupported',
+              `xangi-run-after in ${key} cannot be checked. Not launching`
+            );
+            return false;
+          }
+          // 同じ issue を複数の issue が待っていても、1 回のポーリングで gh を呼ぶのは 1 回だけにする
+          let pending = this.pollIssueStates.get(depKey);
+          if (!pending) {
+            pending = getIssueState(issue);
+            this.pollIssueStates.set(depKey, pending);
+          }
+          state = await pending;
         }
-        state = await pending;
       } catch (err) {
         this.warnRunAfter(
           key,
@@ -423,10 +520,13 @@ export class EventDispatcher {
       if (!this.notCompletedNotified.has(pairKey)) {
         this.notCompletedNotified.add(pairKey);
         console.log(
-          `[event-dispatcher] ${issue.repo}#${issue.number} closed as ${state.stateReason} (xangi-run-after in ${key}). Not launching`
+          `[event-dispatcher] ${issue.repo}#${issue.number} closed as ${state.stateReason} (${viaBlockedBy ? 'Blocked by' : 'xangi-run-after'} of ${key}). Not launching`
         );
+        const fix = viaBlockedBy
+          ? '起動するときは Blocked by から外すか、issue を開き直してください'
+          : '起動するときは `xangi-run-after` の行を直してください';
         await this.safeNotify(
-          `⏸️ 待っている ${issue.repo}#${issue.number} が完了以外（${state.stateReason}）で閉じられたため、起動しません: ${event.id} ${event.title}\n${event.url}\n起動するときは \`xangi-run-after\` の行を直してください`,
+          `⏸️ 待っている ${issue.repo}#${issue.number} が完了以外（${state.stateReason}）で閉じられたため、起動しません: ${event.id} ${event.title}\n${event.url}\n${fix}`,
           event.notifyChannelId
         );
       }

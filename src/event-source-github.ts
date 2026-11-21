@@ -51,6 +51,7 @@ interface GhIssue {
   body: string;
   url: string;
   labels: { name: string }[];
+  createdAt?: string;
 }
 
 export const GITHUB_ISSUE_SOURCE = 'github-issue';
@@ -109,7 +110,7 @@ export class GitHubIssueSource implements EventSource {
       '--limit',
       String(ISSUE_LIMIT),
       '--json',
-      'number,title,body,url,labels',
+      'number,title,body,url,labels,createdAt',
     ]);
     const issues = JSON.parse(stdout) as GhIssue[];
     // gh は新しい順に返す。キューは受け付け順に処理するので、古い issue から積む
@@ -121,6 +122,7 @@ export class GitHubIssueSource implements EventSource {
       body: issue.body ?? '',
       url: issue.url,
       labels: issue.labels.map((l) => l.name),
+      ...(issue.createdAt ? { createdAt: issue.createdAt } : {}),
       ...(target.workdir ? { workdir: target.workdir } : {}),
       ...(target.notifyChannelId ? { notifyChannelId: target.notifyChannelId } : {}),
     }));
