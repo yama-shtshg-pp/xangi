@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'path';
 import { defaultGhExec, type GhExec, type RepoTarget } from './event-source-github.js';
 import type { IssueReadinessChecker } from './issue-readiness.js';
+import { buildHelpText, isHelpWord, type HelpChecker } from './slack-help.js';
 import type { SummarizeTitle } from './title-summarizer.js';
 import { KEY_PATTERN, normalizeKey } from './watch-repos.js';
 
@@ -283,6 +284,8 @@ export interface SlackIssueCreatorOptions {
   summarizeTitle?: SummarizeTitle;
   /** issue の内容で作業を始められるかの判定。未指定なら判定しない */
   readiness?: IssueReadinessChecker;
+  /** 「使い方を聞いているか」の判定。未指定なら、決まった言葉のときだけ早見表を返す */
+  help?: HelpChecker;
   gh?: GhExec;
 }
 
@@ -321,9 +324,21 @@ export class SlackIssueCreator {
    * key が決まらなければ、key の一覧を返す（会話にはしない）
    */
   async handleMention(input: MentionInput): Promise<MentionReply> {
+    // 決まった言葉は、key を探すより前に見る。ウォッチリストに help という key があっても早見表を返す
+    const plain = stripMention(input.text);
+    if (isHelpWord(plain)) return this.helpReply();
+
     const parsed = parseMention(input.text);
     // 最初の語が key の形なら、チャンネルの既定より優先する
     const explicitKey = parsed.key && KEY_PATTERN.test(parsed.key) ? parsed.key : undefined;
+    // key を書いたメンションは issue を立てたいとみなし、Jev で判定しない
+    if (
+      !explicitKey &&
+      plain &&
+      (await this.options.help?.check({ id: `${input.channel}:${input.ts}`, text: plain }))
+    ) {
+      return this.helpReply();
+    }
     const defaultKey = explicitKey ? undefined : await input.loadChannelDefaultKey?.();
     const key = explicitKey ?? defaultKey;
     // 既定の key を使うときは、メンションの文をすべて補足（スレッドの外なら本文）にする
@@ -386,6 +401,23 @@ export class SlackIssueCreator {
       }
       return { text: lines.join('\n'), request };
     });
+  }
+
+  /**
+   * 使い方の早見表を返す。確認のボタンは付けない
+   * 立て済み・処理中でも返したいので、exclusive は通さない
+   */
+  private async helpReply(): Promise<MentionReply> {
+    let keys: string;
+    try {
+      keys = keyTable(await this.options.listTargets());
+    } catch (err) {
+      console.error(
+        `[slack-issue] Failed to load targets for help: ${err instanceof Error ? err.message : String(err)}`
+      );
+      keys = 'ウォッチリストを読めませんでした';
+    }
+    return { text: buildHelpText(keys) };
   }
 
   /** 「作る」が押されたら issue を立て、確認のメッセージに書く文を返す */

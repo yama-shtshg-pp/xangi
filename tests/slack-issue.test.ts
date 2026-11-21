@@ -766,7 +766,7 @@ describe('SlackIssueCreator の使い方の早見表', () => {
 
   it('on: しきい値未満なら、今までどおり（key がなければ key の一覧）', async () => {
     judge.mockResolvedValue({ ok: true, help: 0.1, latencyMs: 1 });
-    const reply = await makeCreator('on').handleMention(mention('Cron が止まった'));
+    const reply = await makeCreator('on').handleMention(mention('定期実行が止まった'));
     expect(reply.text).toBe(
       `issue を立てるリポジトリを key で指定してください（例: \`@xangi 1\`）\n${keyTable(targets)}`
     );
@@ -775,7 +775,7 @@ describe('SlackIssueCreator の使い方の早見表', () => {
   it('on: しきい値未満で、チャンネルの既定の key があれば、確認を返す', async () => {
     judge.mockResolvedValue({ ok: true, help: 0.1, latencyMs: 1 });
     const input = {
-      ...mention('Cron が止まった'),
+      ...mention('定期実行が止まった'),
       loadChannelDefaultKey: async () => '1',
     };
     const reply = await makeCreator('on').handleMention(input);

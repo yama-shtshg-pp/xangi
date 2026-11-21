@@ -74,6 +74,7 @@ import { getJevLoopWatchMode, LoopWatcher, quoteAgentMessage } from './loop-watc
 import { EventDispatcher, isLoadAcceptable, loadEventConfig } from './event-dispatcher.js';
 import { startRunAtDigest } from './run-at-digest.js';
 import { SlackIssueCreator, SlackIssueStore } from './slack-issue.js';
+import { findHelpWordKeys, getJevHelpMode, HelpChecker } from './slack-help.js';
 import { TmuxLauncher, resolveCommandPath, toSessionName } from './tmux-launcher.js';
 import { createClaudeTitleSummarizer } from './title-summarizer.js';
 import { WATCH_REPOS_FILE, WatchRepoList, getWatchListPath } from './watch-repos.js';
@@ -1364,6 +1365,15 @@ async function main() {
       console.log(`[xangi] Jev readiness check: ${readiness.mode}`);
     }
 
+    // Slack で使い方を聞かれたかの判定（決まった言葉は off でも早見表を返す）
+    const slackHelp = new HelpChecker({
+      mode: getJevHelpMode(),
+      logPath: join(dataDir, 'logs', 'jev-help.jsonl'),
+    });
+    if (slackHelp.mode !== 'off') {
+      console.log(`[xangi] Jev help detection: ${slackHelp.mode}`);
+    }
+
     if (eventStore) {
       const store = eventStore;
       const findRunning = (session: string) =>
@@ -1501,11 +1511,26 @@ async function main() {
             },
             onCreated: () => dispatcher.wake(),
             readiness,
+            help: slackHelp,
             ...(eventClaudePath
               ? { summarizeTitle: createClaudeTitleSummarizer(eventClaudePath) }
               : {}),
           });
           console.log('[xangi] Slack mentions create GitHub issues');
+          if (watchList.exists()) {
+            try {
+              const shadowed = findHelpWordKeys(await watchList.load());
+              if (shadowed.length > 0) {
+                console.warn(
+                  `[xangi] Watch list keys ${shadowed.map((k) => `"${k}"`).join(', ')} match the Slack help words. @mention with only that word returns the help, so use another key.`
+                );
+              }
+            } catch (err) {
+              console.error(
+                `[xangi] Failed to check watch list keys against help words: ${err instanceof Error ? err.message : String(err)}`
+              );
+            }
+          }
         } catch (err) {
           // 記録が読めないまま動くと、同じメッセージで issue を立て直してしまうので使わない
           const reason = err instanceof Error ? err.message : String(err);
