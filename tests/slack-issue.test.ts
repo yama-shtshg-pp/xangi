@@ -11,12 +11,14 @@ import {
   decodeIssueRequest,
   encodeIssueRequest,
   formatThread,
+  keyTable,
   parseMention,
   type IssueRequest,
   type MentionInput,
 } from '../src/slack-issue.js';
 import type { RepoTarget } from '../src/event-source-github.js';
 import { IssueReadinessChecker } from '../src/issue-readiness.js';
+import { buildHelpText, HelpChecker } from '../src/slack-help.js';
 
 describe('parseMention', () => {
   it('メンションを除き、最初の語を key、残りを本文にする', () => {
@@ -648,6 +650,173 @@ describe('decodeIssueRequest', () => {
     expect(decodeIssueRequest('nope')).toBeUndefined();
     expect(decodeIssueRequest(JSON.stringify({ ...request, title: undefined }))).toBeUndefined();
     expect(decodeIssueRequest(JSON.stringify({ ...request, inThread: 'yes' }))).toBeUndefined();
+  });
+});
+
+describe('SlackIssueCreator の使い方の早見表', () => {
+  let dir: string;
+  let store: SlackIssueStore;
+  let targets: RepoTarget[];
+  let listTargets: ReturnType<typeof vi.fn>;
+  let judge: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'slack-issue-help-'));
+    store = new SlackIssueStore(join(dir, 'slack-issues.json'));
+    targets = [
+      { repo: 'o/a', label: 'agent', key: '1' },
+      { repo: 'o/b', label: 'bot', key: 'jra' },
+    ];
+    listTargets = vi.fn(async () => targets);
+    judge = vi.fn(async () => ({ ok: true, help: 0.9, latencyMs: 1 }));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeCreator(mode: 'off' | 'shadow' | 'on' = 'on') {
+    return new SlackIssueCreator({
+      listTargets,
+      store,
+      onCreated: vi.fn(),
+      gh: vi.fn(),
+      help: new HelpChecker({ mode, logPath: join(dir, 'logs', 'jev-help.jsonl'), judge }),
+    });
+  }
+
+  function mention(text: string, inThread = false): MentionInput {
+    return {
+      text: `<@U0> ${text}`,
+      channel: 'C1',
+      ts: '100.1',
+      mentionTs: inThread ? '100.5' : '100.1',
+      inThread,
+      loadMessages: async () => [
+        { ts: '100.1', author: 'Alert', text: 'Cron failed' },
+        { ts: '100.5', author: '<@U9>', text },
+      ],
+      getPermalink: async () => 'https://slack/p',
+    };
+  }
+
+  const helpText = () => buildHelpText(keyTable(targets));
+
+  it.each(['使い方', 'ヘルプ', 'help', '?', '？', ' Help? ', '使い方？'])(
+    '決まった言葉 %s は、Jev を呼ばずに早見表を返し、確認のボタンを付けない',
+    async (word) => {
+      const reply = await makeCreator().handleMention(mention(word));
+      expect(reply).toEqual({ text: helpText() });
+      expect(reply.request).toBeUndefined();
+      expect(judge).not.toHaveBeenCalled();
+    }
+  );
+
+  it('スレッドの中でも外でも同じ早見表を返す', async () => {
+    const creator = makeCreator();
+    const outside = await creator.handleMention(mention('使い方', false));
+    const inside = await creator.handleMention(mention('使い方', true));
+    expect(inside).toEqual(outside);
+    expect(inside.text).toBe(helpText());
+  });
+
+  it('早見表の末尾に key の一覧を付ける', async () => {
+    const reply = await makeCreator().handleMention(mention('help'));
+    expect(reply.text.endsWith(keyTable(targets))).toBe(true);
+    expect(reply.text).toContain('`jra` o/b');
+  });
+
+  it('ウォッチリストに同じ名前の key（help）があっても、早見表を返す', async () => {
+    targets = [{ repo: 'o/h', label: 'agent', key: 'help' }, ...targets];
+    const reply = await makeCreator().handleMention(mention('help'));
+    expect(reply.text).toBe(helpText());
+    expect(reply.request).toBeUndefined();
+  });
+
+  it('issue を立て済みのスレッドでも、早見表を返す', async () => {
+    store.set('C1', '100.1', 'https://github.com/o/a/issues/9');
+    const reply = await makeCreator().handleMention(mention('使い方', true));
+    expect(reply.text).toBe(helpText());
+  });
+
+  it('ウォッチリストを読めなければ、key の一覧の代わりにそのことを書く', async () => {
+    listTargets.mockRejectedValue(new Error('watch-repos.json がありません'));
+    const reply = await makeCreator().handleMention(mention('help'));
+    expect(reply.text).toBe(buildHelpText('ウォッチリストを読めませんでした'));
+    expect(reply.request).toBeUndefined();
+  });
+
+  it('key を明示したメンションでは、Jev を呼ばず、今までどおり確認を返す', async () => {
+    const reply = await makeCreator().handleMention(mention('1 Cron が止まった'));
+    expect(judge).not.toHaveBeenCalled();
+    expect(reply.request).toMatchObject({ key: '1', explicitKey: true });
+  });
+
+  it('key が help の形でも、決まった言葉でなければ key として読む', async () => {
+    const reply = await makeCreator().handleMention(mention('help 内容'));
+    expect(judge).not.toHaveBeenCalled();
+    expect(reply.text).toContain('key `help`');
+  });
+
+  it('on: key がなく、Jev が使い方の質問と判定したら、早見表を返す', async () => {
+    const reply = await makeCreator('on').handleMention(mention('起動日ってどう書くんだっけ'));
+    expect(judge).toHaveBeenCalledWith('起動日ってどう書くんだっけ');
+    expect(reply).toEqual({ text: helpText() });
+  });
+
+  it('on: しきい値未満なら、今までどおり（key がなければ key の一覧）', async () => {
+    judge.mockResolvedValue({ ok: true, help: 0.1, latencyMs: 1 });
+    const reply = await makeCreator('on').handleMention(mention('定期実行が止まった'));
+    expect(reply.text).toBe(
+      `issue を立てるリポジトリを key で指定してください（例: \`@xangi 1\`）\n${keyTable(targets)}`
+    );
+  });
+
+  it('on: しきい値未満で、チャンネルの既定の key があれば、確認を返す', async () => {
+    judge.mockResolvedValue({ ok: true, help: 0.1, latencyMs: 1 });
+    const input = {
+      ...mention('定期実行が止まった'),
+      loadChannelDefaultKey: async () => '1',
+    };
+    const reply = await makeCreator('on').handleMention(input);
+    expect(reply.request).toMatchObject({ key: '1', explicitKey: false });
+  });
+
+  it('shadow: 判定は呼ぶが、返事は今までどおり', async () => {
+    const reply = await makeCreator('shadow').handleMention(mention('起動日ってどう書くんだっけ'));
+    await vi.waitFor(() => expect(judge).toHaveBeenCalledTimes(1));
+    expect(reply.text).toContain('key で指定してください');
+    expect(reply.text).not.toContain('xangi の使い方');
+  });
+
+  it('off: Jev を呼ばず、今までどおり', async () => {
+    const reply = await makeCreator('off').handleMention(mention('起動日ってどう書くんだっけ'));
+    expect(judge).not.toHaveBeenCalled();
+    expect(reply.text).toContain('key で指定してください');
+  });
+
+  it('Jev が失敗しても、今までどおり進む（fail-open）', async () => {
+    judge.mockResolvedValue({ ok: false, error: 'timeout', latencyMs: 800 });
+    const reply = await makeCreator('on').handleMention(mention('起動日ってどう書くんだっけ'));
+    expect(reply.text).toContain('key で指定してください');
+  });
+
+  it('メンションの文が空なら、Jev を呼ばない', async () => {
+    await makeCreator('on').handleMention(mention(''));
+    expect(judge).not.toHaveBeenCalled();
+  });
+
+  it('help を渡さなければ、決まった言葉だけ早見表を返し、自然な文は今までどおり', async () => {
+    const creator = new SlackIssueCreator({
+      listTargets,
+      store,
+      onCreated: vi.fn(),
+      gh: vi.fn(),
+    });
+    expect((await creator.handleMention(mention('使い方'))).text).toBe(helpText());
+    expect((await creator.handleMention(mention('起動日ってどう書くんだっけ'))).text).toContain(
+      'key で指定してください'
+    );
   });
 });
 
