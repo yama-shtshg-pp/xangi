@@ -79,7 +79,7 @@ describe('buildRunAtDigest', () => {
         '    ◦ <https://github.com/o/r/issues/1|issue 1> r#1',
         '',
         '*起動日を読めず、起動しない issue（1 件）*',
-        '`xangi-run-at: YYYY-MM-DD` か `YYYY-MM-DDTHH:MM` に直すと起動します',
+        '`起動: 2026-11-20 14:00` や `起動: 11/20 14時` の形に直すと起動します',
         '• <https://github.com/o/r/issues/2|issue 2> r#2（`2026.11.20`）',
       ].join('\n')
     );

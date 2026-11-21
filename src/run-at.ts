@@ -40,21 +40,24 @@ export type RunAt =
 /** 値の先頭から日付を読む。読めなければ undefined */
 function readDate(
   value: string
-): { year?: number; month: number; day: number; rest: string } | undefined {
+): { year?: number; month: number; day: number; rest: string; dayEnded: boolean } | undefined {
   for (const { re, hasYear } of DATE_PATTERNS) {
     const m = re.exec(value);
     if (!m) continue;
     const rest = value.slice(m[0].length);
+    const dayEnded = m[0].endsWith('日');
     return hasYear
-      ? { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), rest }
-      : { month: Number(m[1]), day: Number(m[2]), rest };
+      ? { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), rest, dayEnded }
+      : { month: Number(m[1]), day: Number(m[2]), rest, dayEnded };
   }
   return undefined;
 }
 
 /** 日付のあとの時刻を読む。なければ 09:00、読めなければ undefined */
-function readTime(rest: string): { hour: number; minute: number } | undefined {
+function readTime(rest: string, dayEnded: boolean): { hour: number; minute: number } | undefined {
   if (rest === '') return { hour: DEFAULT_HOUR, minute: 0 };
+  // `2026-11-2014:00` は日と時の区切りが分からないので、日付が「日」で終わるときだけ空白なしを許す
+  if (/^\d/.test(rest) && !dayEnded) return undefined;
   for (const re of TIME_PATTERNS) {
     const m = re.exec(rest);
     if (m) return { hour: Number(m[1]), minute: m[2] === undefined ? 0 : Number(m[2]) };
@@ -87,7 +90,7 @@ export function parseRunAt(body: string, createdAt?: Date | string): RunAt {
   const invalid: RunAt = { kind: 'invalid', value };
   const date = readDate(value);
   if (!date) return invalid;
-  const time = readTime(date.rest);
+  const time = readTime(date.rest, date.dayEnded);
   if (!time || time.hour > 23 || time.minute > 59) return invalid;
   const year = date.year ?? inferYear(date.month, date.day, createdAt);
   if (year === undefined) return invalid;
