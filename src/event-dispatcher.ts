@@ -213,18 +213,21 @@ const RUN_AT_EXAMPLES = [
 ];
 const RUN_AFTER_EXAMPLE = '`待つ: #12, repo#3, https://github.com/owner/repo/issues/3`';
 
-function buildInvalidSpecComment(kind: InvalidSpecKind, value: string): string {
+function buildInvalidSpecComment(kind: InvalidSpecKind, rawValue: string): string {
+  // コードスパンで囲み、`@someone` でメンションが飛ばないようにする。値のバッククォートは囲みが切れるので外す
+  const shown = rawValue.replace(/`/g, '');
+  const value = shown ? `\`${shown}\`` : '（空）';
   const lines =
     kind === 'runAt'
       ? [
-          `起動日時の行の値「${value}」を読めなかったため、Claude Code を起動していません。`,
+          `起動日時の行の値 ${value} を読めなかったため、Claude Code を起動していません。`,
           '',
           '次のように書き直すと、次の確認で読み直します。',
           '',
           ...RUN_AT_EXAMPLES.map((e) => `- ${e}`),
         ]
       : [
-          `待つ issue の行の値「${value}」を読めなかったため、Claude Code を起動していません。`,
+          `待つ issue の行の値 ${value} を読めなかったため、Claude Code を起動していません。`,
           '',
           '次のように書き直すと、次の確認で読み直します。',
           '',
@@ -257,6 +260,8 @@ export class EventDispatcher {
   private invalidRunAtWarned = new Map<string, string>();
   /** `xangi-run-after` について警告済みの issue と内容（同じ内容で毎回ログを出さない） */
   private runAfterWarned = new Map<string, string>();
+  /** 読めない値のコメントに失敗したと、ログに出した issue・種類と値（同じ値で毎回ログを出さない） */
+  private commentFailureLogged = new Map<string, string>();
   /** not planned などで閉じたと通知済みの組（待っている issue -> 待たれている issue） */
   private notCompletedNotified = new Set<string>();
   /**
@@ -393,12 +398,21 @@ export class EventDispatcher {
   ): Promise<void> {
     const { comment, store } = this.options;
     if (!comment || store.invalidSpecCommented(event, kind) === value) return;
+    // 積んだ・起動中・終了の issue には書かない（起動していないと書くと、実際と合わない）
+    const status = store.statusOf(event);
+    if (status !== undefined && status !== 'needs_info') return;
+    const failKey = `${event.source}:${event.id}:${kind}`;
     try {
       await comment(event, buildInvalidSpecComment(kind, value));
     } catch (err) {
-      logError(`comment on ${event.id}`, err);
+      // 再試行は毎回するが、同じ値の失敗のログは 1 回だけにする
+      if (this.commentFailureLogged.get(failKey) !== value) {
+        this.commentFailureLogged.set(failKey, value);
+        logError(`comment on ${event.id}`, err);
+      }
       return;
     }
+    this.commentFailureLogged.delete(failKey);
     store.recordInvalidSpecComment(event, kind, value);
   }
 

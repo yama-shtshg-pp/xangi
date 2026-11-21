@@ -140,7 +140,11 @@ export function parseBlockedBy(stdout: string): BlockedByIssue[] {
       const reason = item.state_reason;
       result.push({
         issue: { repo, number: item.number },
-        state: { state: item.state, stateReason: typeof reason === 'string' ? reason : '' },
+        // gh issue view の値（CLOSED、NOT_PLANNED）と表記をそろえる
+        state: {
+          state: item.state.toUpperCase(),
+          stateReason: typeof reason === 'string' ? reason.toUpperCase() : '',
+        },
       });
     }
   }
