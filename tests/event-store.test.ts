@@ -232,6 +232,73 @@ describe('EventStore', () => {
     });
   });
 
+  describe('新しい書き方の xangi-run-at（createdAt を使う）', () => {
+    it('年を省いた日付の記録と書き換えの判定に、イベントの createdAt を使う', () => {
+      const store = new EventStore(path);
+      const base = {
+        ...makeEvent('o/r#1'),
+        createdAt: '2026-11-01T00:00:00Z',
+      };
+      store.enqueue({ ...base, body: '起動: 11/10' });
+      expect(store.nextQueued()?.runAt).toBe('2026-11-10T00:00:00.000Z');
+      store.setStatus(base, 'done');
+      expect(store.requeueIfRunAtChanged({ ...base, body: '起動: 11/10 9時' })).toBe(false);
+      expect(store.requeueIfRunAtChanged({ ...base, body: '起動日：11月17日' })).toBe(true);
+      expect(store.nextQueued()?.runAt).toBe('2026-11-17T00:00:00.000Z');
+    });
+
+    it('createdAt のない古い記録でも壊れず、年を省いた日付は null になる', () => {
+      const store = new EventStore(path);
+      const event = { ...makeEvent('o/r#1'), body: '起動: 11/10' };
+      expect(() => store.enqueue(event)).not.toThrow();
+      expect(store.nextQueued()?.runAt).toBeNull();
+    });
+  });
+
+  describe('読めない値のコメントの記録', () => {
+    const event = makeEvent('o/r#1');
+
+    it('記録がなければ undefined。記録した値を、読み直しても返す', () => {
+      const store = new EventStore(path);
+      expect(store.invalidSpecCommented(event, 'runAt')).toBeUndefined();
+      store.recordInvalidSpecComment(event, 'runAt', 'あした');
+      expect(store.invalidSpecCommented(event, 'runAt')).toBe('あした');
+      expect(store.invalidSpecCommented(event, 'runAfter')).toBeUndefined();
+      expect(new EventStore(path).invalidSpecCommented(event, 'runAt')).toBe('あした');
+    });
+
+    it('run-at と run-after は別に記録し、clear は指定した種類だけ消す', () => {
+      const store = new EventStore(path);
+      store.recordInvalidSpecComment(event, 'runAt', 'a');
+      store.recordInvalidSpecComment(event, 'runAfter', 'b');
+      store.clearInvalidSpecComment(event, 'runAt');
+      const reloaded = new EventStore(path);
+      expect(reloaded.invalidSpecCommented(event, 'runAt')).toBeUndefined();
+      expect(reloaded.invalidSpecCommented(event, 'runAfter')).toBe('b');
+    });
+
+    it('リポジトリ名の大文字・小文字を区別しない', () => {
+      const store = new EventStore(path);
+      store.recordInvalidSpecComment(makeEvent('O/R#1'), 'runAt', 'a');
+      expect(store.invalidSpecCommented(makeEvent('o/r#1'), 'runAt')).toBe('a');
+    });
+
+    it('records の読み書きを壊さず、records だけの古いファイルも読める', () => {
+      writeFileSync(path, JSON.stringify({ records: [] }));
+      const store = new EventStore(path);
+      store.enqueue(event);
+      store.recordInvalidSpecComment(event, 'runAt', 'a');
+      const raw = JSON.parse(readFileSync(path, 'utf-8')) as { records: unknown[] };
+      expect(raw.records).toHaveLength(1);
+      expect(new EventStore(path).has(event)).toBe(true);
+    });
+
+    it('記録がないのに clear しても、ファイルを作らない', () => {
+      new EventStore(path).clearInvalidSpecComment(event, 'runAt');
+      expect(readdirSync(dir)).toEqual([]);
+    });
+  });
+
   it('壊れたファイルは空から始めずに例外を投げ、ファイルには触らない', () => {
     writeFileSync(path, '{broken');
     expect(() => new EventStore(path)).toThrow(/Failed to read/);

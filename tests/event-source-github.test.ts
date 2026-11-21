@@ -12,6 +12,7 @@ const issues = [
     body: '本文',
     url: 'https://github.com/o/a/issues/12',
     labels: [{ name: 'agent' }, { name: 'bug' }],
+    createdAt: '2026-11-01T03:00:00Z',
   },
 ];
 
@@ -34,7 +35,7 @@ describe('GitHubIssueSource', () => {
       '--limit',
       '50',
       '--json',
-      'number,title,body,url,labels',
+      'number,title,body,url,labels,createdAt',
     ]);
     expect(events).toEqual([
       {
@@ -44,6 +45,7 @@ describe('GitHubIssueSource', () => {
         body: '本文',
         url: 'https://github.com/o/a/issues/12',
         labels: ['agent', 'bug'],
+        createdAt: '2026-11-01T03:00:00Z',
       },
     ]);
   });

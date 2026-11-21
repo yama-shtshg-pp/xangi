@@ -27,6 +27,15 @@ describe('buildRunAtDigest', () => {
     expect(buildRunAtDigest([issue(1, '本文だけ')], NOW)).toBeUndefined();
   });
 
+  it('新しい書き方（起動: 11/20 14時）の issue も、createdAt から年を決めて載せる', () => {
+    const message = buildRunAtDigest(
+      [{ ...issue(1, '起動: 11/20 14時'), createdAt: '2026-11-01T00:00:00Z' }],
+      NOW
+    );
+    expect(message).toContain('2026-11-20（金）14:00');
+    expect(message).toContain('o/r#1');
+  });
+
   it('起動待ちの issue を起動日時の近い順に、日時ごとにまとめて並べる', () => {
     const message = buildRunAtDigest(
       [
