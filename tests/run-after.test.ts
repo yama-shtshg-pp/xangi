@@ -131,11 +131,11 @@ describe('parseBlockedBy', () => {
       ])
     );
     expect(out).toEqual([
-      { issue: { repo: 'o/b', number: 3 }, state: { state: 'closed', stateReason: 'completed' } },
-      { issue: { repo: 'o/a', number: 4 }, state: { state: 'open', stateReason: '' } },
+      { issue: { repo: 'o/b', number: 3 }, state: { state: 'CLOSED', stateReason: 'COMPLETED' } },
+      { issue: { repo: 'o/a', number: 4 }, state: { state: 'OPEN', stateReason: '' } },
       {
         issue: { repo: 'o/a', number: 5 },
-        state: { state: 'closed', stateReason: 'not_planned' },
+        state: { state: 'CLOSED', stateReason: 'NOT_PLANNED' },
       },
     ]);
     // 大文字にして比べるので、そのまま issueProgress に渡せる

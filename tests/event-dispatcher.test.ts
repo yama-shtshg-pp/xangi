@@ -887,6 +887,73 @@ describe('EventDispatcher', () => {
       expect(comment).toHaveBeenCalledTimes(2);
     });
 
+    it('comment の失敗のログは、同じ値なら 1 回だけ。コメントの再試行は毎回する。値が変わればまた出す', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      comment.mockRejectedValue(new Error('gh failed'));
+      events = [withBody('起動: あした')];
+      const dispatcher = makeDispatcher({ comment });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(comment).toHaveBeenCalledTimes(3);
+      expect(error).toHaveBeenCalledTimes(1);
+
+      events = [withBody('起動: あさって')];
+      await dispatcher.poll();
+      expect(error).toHaveBeenCalledTimes(2);
+    });
+
+    it('値はコードスパンで囲み、バッククォートは除く（メンションが飛ばない）', async () => {
+      events = [withBody('起動: @someone`x')];
+      await makeDispatcher({ comment }).poll();
+      const message = comment.mock.calls[0][1] as string;
+      expect(message).toContain('`@someonex`');
+      expect(message).not.toContain('「@someone');
+      expect(message).not.toContain('@someone`x');
+    });
+
+    it('待つ issue の値もコードスパンで囲む', async () => {
+      events = [withBody('待つ: @someone')];
+      await makeDispatcher({ comment }).poll();
+      expect(comment.mock.calls[0][1]).toContain('`@someone`');
+    });
+
+    describe('積んだ後の issue', () => {
+      it.each(['queued', 'running', 'done'] as const)(
+        '%s の issue には、読めない値でもコメントしない（警告と起動しない判定はそのまま）',
+        async (status) => {
+          const warn = vi.mocked(console.warn);
+          const valid = withBody('起動: 2026-11-10');
+          store.enqueue(valid);
+          if (status !== 'queued') store.setRunning(valid, 'cc-a-issue1');
+          if (status === 'running') alive.add('cc-a-issue1');
+          if (status === 'done') store.setStatus(valid, 'done');
+          events = [withBody('起動: あした')];
+          await makeDispatcher({ comment }).poll();
+          expect(comment).not.toHaveBeenCalled();
+          expect(warn).toHaveBeenCalledTimes(1);
+          expect(store.invalidSpecCommented(valid, 'runAt')).toBeUndefined();
+        }
+      );
+
+      it('needs_info の issue にはコメントする', async () => {
+        const valid = withBody('起動: 2026-11-10');
+        store.enqueue(valid);
+        store.setStatus(valid, 'needs_info');
+        events = [withBody('起動: あした')];
+        await makeDispatcher({ comment }).poll();
+        expect(comment).toHaveBeenCalledTimes(1);
+      });
+
+      it('待つ issue の読めない値も、積んだ後の issue にはコメントしない', async () => {
+        const valid = withBody('待つ: #9');
+        store.enqueue(valid);
+        events = [withBody('待つ: 12')];
+        await makeDispatcher({ comment }).poll();
+        expect(comment).not.toHaveBeenCalled();
+      });
+    });
+
     it('comment がなくても動く', async () => {
       events = [withBody('起動: あした')];
       await expect(makeDispatcher().poll()).resolves.toBeUndefined();
