@@ -55,7 +55,13 @@ import { join, resolve } from 'path';
 import { config as dotenvConfig } from 'dotenv';
 import { startWebChat } from './web-chat.js';
 import { EventStore } from './event-store.js';
-import { defaultGhExec, GitHubIssueSource, type RepoTarget } from './event-source-github.js';
+import {
+  defaultGhExec,
+  GITHUB_ISSUE_SOURCE,
+  GitHubIssueSource,
+  type RepoTarget,
+} from './event-source-github.js';
+import { parseBlockedBy } from './run-after.js';
 import { getJevReadinessMode, IssueReadinessChecker } from './issue-readiness.js';
 import { getJevToolRiskMode, ToolRiskChecker } from './tool-risk.js';
 import {
@@ -1446,6 +1452,17 @@ async function main() {
           const parsed = JSON.parse(stdout) as { state?: string; stateReason?: string };
           if (!parsed.state) throw new Error('gh returned no state');
           return { state: parsed.state, stateReason: parsed.stateReason ?? '' };
+        },
+        getBlockedBy: async (event) => {
+          if (event.source !== GITHUB_ISSUE_SOURCE) return [];
+          const m = /^(.+)#(\d+)$/.exec(event.id);
+          if (!m) return [];
+          const stdout = await defaultGhExec([
+            'api',
+            '--paginate',
+            `repos/${m[1]}/issues/${m[2]}/dependencies/blocked_by`,
+          ]);
+          return parseBlockedBy(stdout);
         },
       });
       // 初回のポーリング（gh の呼び出し）で起動処理を待たせない

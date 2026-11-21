@@ -65,7 +65,7 @@ export function buildRunAtDigest(
   const waiting: { event: AgentEvent; at: Date }[] = [];
   const invalid: { event: AgentEvent; value: string }[] = [];
   for (const event of events) {
-    const runAt = parseRunAt(event.body);
+    const runAt = parseRunAt(event.body, event.createdAt);
     if (runAt.kind === 'valid' && runAt.at.getTime() > now.getTime()) {
       waiting.push({ event, at: runAt.at });
     } else if (runAt.kind === 'invalid') {
@@ -96,7 +96,7 @@ export function buildRunAtDigest(
     if (lines.length > 0) lines.push('');
     lines.push(
       `*起動日を読めず、起動しない issue（${invalid.length} 件）*`,
-      '`xangi-run-at: YYYY-MM-DD` か `YYYY-MM-DDTHH:MM` に直すと起動します'
+      '`起動: 2026-11-20 14:00` や `起動: 11/20 14時` の形に直すと起動します'
     );
     for (const { event, value } of invalid) {
       // 値にバッククォートがあるとコードの表示が切れるので外す。空なら空と書く

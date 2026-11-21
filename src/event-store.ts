@@ -28,7 +28,12 @@ export interface AgentEvent {
   workdir?: string;
   /** 起動・終了・失敗の通知先。未指定なら EVENT_NOTIFY_CHANNEL_ID */
   notifyChannelId?: string;
+  /** issue を作った日時（ISO 8601）。年を省いた起動日の年を決めるのに使う。古い記録にはない */
+  createdAt?: string;
 }
+
+/** 読めない値をコメントした記録の種類（本文の `xangi-run-at` と `xangi-run-after`） */
+export type InvalidSpecKind = 'runAt' | 'runAfter';
 
 /**
  * needs_info: 内容が足りず起動しなかった。タイトルか本文が変わったら、キューに積み直す
@@ -52,13 +57,18 @@ export interface EventRecord {
 }
 
 /** 本文の `xangi-run-at` の日時を、記録に残す形にする */
-function recordedRunAt(body: string): string | null {
-  const runAt = parseRunAt(body);
+function recordedRunAt(event: Pick<AgentEvent, 'body' | 'createdAt'>): string | null {
+  const runAt = parseRunAt(event.body, event.createdAt);
   return runAt.kind === 'valid' ? runAt.at.toISOString() : null;
 }
 
 export class EventStore {
   private records = new Map<string, EventRecord>();
+  /**
+   * 読めない値を issue にコメントした記録（キーは issue、値は種類ごとの、コメントした値）
+   * xangi を再起動しても、同じ値で 2 回コメントしないために残す
+   */
+  private invalidSpecComments = new Map<string, Partial<Record<InvalidSpecKind, string>>>();
 
   constructor(private filePath: string) {
     this.load();
@@ -72,9 +82,12 @@ export class EventStore {
 
   private load(): void {
     if (!existsSync(this.filePath)) return;
-    let raw: { records?: EventRecord[] };
+    let raw: {
+      records?: EventRecord[];
+      invalidSpecComments?: Record<string, Partial<Record<InvalidSpecKind, string>>>;
+    };
     try {
-      raw = JSON.parse(readFileSync(this.filePath, 'utf-8')) as { records?: EventRecord[] };
+      raw = JSON.parse(readFileSync(this.filePath, 'utf-8')) as typeof raw;
     } catch (err) {
       throw new Error(
         `Failed to read ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`
@@ -83,14 +96,52 @@ export class EventStore {
     for (const record of raw.records ?? []) {
       this.records.set(this.key(record.event), record);
     }
+    for (const [key, comments] of Object.entries(raw.invalidSpecComments ?? {})) {
+      this.invalidSpecComments.set(key, comments);
+    }
   }
 
   private save(): void {
     mkdirSync(dirname(this.filePath), { recursive: true });
     const tmpPath = `${this.filePath}.tmp`;
-    const data = { records: Array.from(this.records.values()) };
+    const data: {
+      records: EventRecord[];
+      invalidSpecComments?: Record<string, Partial<Record<InvalidSpecKind, string>>>;
+    } = { records: Array.from(this.records.values()) };
+    if (this.invalidSpecComments.size > 0) {
+      data.invalidSpecComments = Object.fromEntries(this.invalidSpecComments);
+    }
     writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
     renameSync(tmpPath, this.filePath);
+  }
+
+  /** 読めない値をコメントしていれば、そのときの値。していなければ undefined */
+  invalidSpecCommented(
+    event: Pick<AgentEvent, 'source' | 'id'>,
+    kind: InvalidSpecKind
+  ): string | undefined {
+    return this.invalidSpecComments.get(this.key(event))?.[kind];
+  }
+
+  /** 読めない値をコメントしたと記録する */
+  recordInvalidSpecComment(
+    event: Pick<AgentEvent, 'source' | 'id'>,
+    kind: InvalidSpecKind,
+    value: string
+  ): void {
+    const key = this.key(event);
+    this.invalidSpecComments.set(key, { ...this.invalidSpecComments.get(key), [kind]: value });
+    this.save();
+  }
+
+  /** 読めるようになったので、コメントの記録を消す。記録がなければ何もしない */
+  clearInvalidSpecComment(event: Pick<AgentEvent, 'source' | 'id'>, kind: InvalidSpecKind): void {
+    const key = this.key(event);
+    const comments = this.invalidSpecComments.get(key);
+    if (comments?.[kind] === undefined) return;
+    delete comments[kind];
+    if (Object.keys(comments).length === 0) this.invalidSpecComments.delete(key);
+    this.save();
   }
 
   has(event: Pick<AgentEvent, 'source' | 'id'>): boolean {
@@ -111,7 +162,7 @@ export class EventStore {
       status: 'queued',
       receivedAt: now,
       updatedAt: now,
-      runAt: recordedRunAt(event.body),
+      runAt: recordedRunAt(event),
     });
     this.save();
     return true;
@@ -126,7 +177,7 @@ export class EventStore {
     if (!record || record.status !== 'needs_info') return false;
     if (record.event.title === event.title && record.event.body === event.body) return false;
     record.event = event;
-    record.runAt = recordedRunAt(event.body);
+    record.runAt = recordedRunAt(event);
     this.setStatus(event, 'queued');
     return true;
   }
@@ -142,7 +193,7 @@ export class EventStore {
     const record = this.records.get(this.key(event));
     if (!record || record.status !== 'done') return false;
     if (this.adoptLegacyRunAt(event)) return false;
-    const current = recordedRunAt(event.body);
+    const current = recordedRunAt(event);
     if (current === null || current === record.runAt) return false;
     record.event = event;
     record.runAt = current;
@@ -159,7 +210,7 @@ export class EventStore {
   adoptLegacyRunAt(event: AgentEvent): boolean {
     const record = this.records.get(this.key(event));
     if (!record || record.runAt !== undefined) return false;
-    record.runAt = recordedRunAt(event.body);
+    record.runAt = recordedRunAt(event);
     this.save();
     return true;
   }

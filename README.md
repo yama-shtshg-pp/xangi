@@ -101,6 +101,20 @@ pm2 logs xangi     # ログ確認
 
 応答メッセージにはボタン（Stop / New Session）が表示されます。`DISCORD_SHOW_BUTTONS=false` で非表示。
 
+### issue から Claude Code を起動する
+
+GitHub の issue から Claude Code を起動できます（`EVENTS_ENABLED=true`）。
+issue の本文の行頭に書くと、起動する日時や、先に終わらせる issue を指定できます。
+
+```
+起動: 11/20 14時
+待つ: #12
+```
+
+- `起動:` は起動する日時（JST）、`待つ:` はその issue が完了で close されるまで待つ指定です
+- GitHub の「Blocked by」に指定した issue も、同じように待ちます
+- 書ける形や注意点は [使い方ガイド](docs/usage.md#起動する日を指定する) を参照してください
+
 詳細は [使い方ガイド](docs/usage.md) を参照してください。
 
 ## Docker で実行する場合

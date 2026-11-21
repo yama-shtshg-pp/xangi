@@ -27,6 +27,15 @@ describe('buildRunAtDigest', () => {
     expect(buildRunAtDigest([issue(1, '本文だけ')], NOW)).toBeUndefined();
   });
 
+  it('新しい書き方（起動: 11/20 14時）の issue も、createdAt から年を決めて載せる', () => {
+    const message = buildRunAtDigest(
+      [{ ...issue(1, '起動: 11/20 14時'), createdAt: '2026-11-01T00:00:00Z' }],
+      NOW
+    );
+    expect(message).toContain('2026-11-20（金）14:00');
+    expect(message).toContain('issue 1');
+  });
+
   it('起動待ちの issue を起動日時の近い順に、日時ごとにまとめて並べる', () => {
     const message = buildRunAtDigest(
       [
@@ -60,7 +69,7 @@ describe('buildRunAtDigest', () => {
 
   it('読めない issue を書かれた値と一緒に載せる', () => {
     const message = buildRunAtDigest(
-      [issue(1, 'xangi-run-at: 2026-11-20'), issue(2, 'xangi-run-at: 2026/11/20')],
+      [issue(1, 'xangi-run-at: 2026-11-20'), issue(2, 'xangi-run-at: 2026.11.20')],
       NOW
     );
     expect(message).toBe(
@@ -70,8 +79,8 @@ describe('buildRunAtDigest', () => {
         '    ◦ <https://github.com/o/r/issues/1|issue 1> r#1',
         '',
         '*起動日を読めず、起動しない issue（1 件）*',
-        '`xangi-run-at: YYYY-MM-DD` か `YYYY-MM-DDTHH:MM` に直すと起動します',
-        '• <https://github.com/o/r/issues/2|issue 2> r#2（`2026/11/20`）',
+        '`起動: 2026-11-20 14:00` や `起動: 11/20 14時` の形に直すと起動します',
+        '• <https://github.com/o/r/issues/2|issue 2> r#2（`2026.11.20`）',
       ].join('\n')
     );
   });

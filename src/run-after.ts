@@ -6,10 +6,12 @@
  * 本文の 1 行で待つ issue を書き、ラベルは最初から付けておけるようにする。
  */
 
-/** 行頭の `xangi-run-after:` の値を取る。行が複数あれば、すべての行の issue を待つ */
-const RUN_AFTER_LINE = /^xangi-run-after:[ \t]*(.*?)[ \t]*$/gm;
-/** `#12` か `owner/repo#12` */
-const ISSUE_REF = /^(?:([\w.-]+\/[\w.-]+))?#(\d+)$/;
+/** 行頭の `xangi-run-after:` か `待つ:` の値を取る。行が複数あれば、すべての行の issue を待つ */
+const RUN_AFTER_LINE = /^(?:xangi-run-after|待つ)[:：][ \t]*(.*?)[ \t]*$/gm;
+/** `#12`、`repo#12`、`owner/repo#12` */
+const ISSUE_REF = /^(?:([\w.-]+\/[\w.-]+)|([\w.-]+))?#(\d+)$/;
+/** issue の URL。末尾の `#issuecomment-…` や `?…` は無視する。PR の URL は読まない */
+const ISSUE_URL = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)(?:[#?].*)?$/;
 
 export interface IssueRef {
   /** owner/repo */
@@ -35,9 +37,8 @@ export function parseRunAfter(body: string, repo: string): RunAfter {
     const value = line[1];
     const refs = value.split(',').map((s) => s.trim());
     for (const ref of refs) {
-      const m = ISSUE_REF.exec(ref);
-      if (!m) return { kind: 'invalid', value };
-      const issue = { repo: m[1] ?? repo, number: Number(m[2]) };
+      const issue = parseIssueRef(ref, repo);
+      if (!issue) return { kind: 'invalid', value };
       // リポジトリ名は大文字・小文字を区別しない
       const key = issueKey(issue);
       if (seen.has(key)) continue;
@@ -46,6 +47,16 @@ export function parseRunAfter(body: string, repo: string): RunAfter {
     }
   }
   return found ? { kind: 'valid', issues } : { kind: 'none' };
+}
+
+function parseIssueRef(ref: string, repo: string): IssueRef | undefined {
+  const url = ISSUE_URL.exec(ref);
+  if (url) return { repo: url[1], number: Number(url[2]) };
+  const m = ISSUE_REF.exec(ref);
+  if (!m) return undefined;
+  // `repo#3` の owner は、本文を書いた issue のリポジトリの owner
+  const owner = repo.split('/')[0];
+  return { repo: m[1] ?? (m[2] ? `${owner}/${m[2]}` : repo), number: Number(m[3]) };
 }
 
 export function issueKey(issue: IssueRef): string {
@@ -73,4 +84,69 @@ export function issueProgress(state: IssueState): IssueProgress {
   if (s !== 'CLOSED') return 'unknown';
   const reason = state.stateReason.toUpperCase();
   return reason === 'COMPLETED' || reason === '' ? 'completed' : 'not_completed';
+}
+
+/** GitHub の「Blocked by」に指定された issue と、その状態 */
+export interface BlockedByIssue {
+  issue: IssueRef;
+  state: IssueState;
+}
+
+/** `gh api --paginate` の出力は、ページごとの配列をつなげたものになる。文字列の中の括弧を数えないよう読み分ける */
+function splitJsonArrays(text: string): string[] {
+  const chunks: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === '[' || c === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) chunks.push(text.slice(start, i + 1));
+    }
+  }
+  return chunks;
+}
+
+/**
+ * `GET /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` の出力を読む
+ * 読めない出力は例外にする（待つ issue を取りこぼして、早く起動しないため）
+ */
+export function parseBlockedBy(stdout: string): BlockedByIssue[] {
+  const result: BlockedByIssue[] = [];
+  const trimmed = stdout.trim();
+  if (trimmed === '') return result;
+  const chunks = splitJsonArrays(trimmed);
+  if (chunks.length === 0) throw new Error('blocked_by response is not a JSON array');
+  for (const chunk of chunks) {
+    const items = JSON.parse(chunk) as unknown;
+    if (!Array.isArray(items)) throw new Error('blocked_by response is not a JSON array');
+    for (const item of items as Record<string, unknown>[]) {
+      const repo = /\/repos\/([^/]+\/[^/]+)$/.exec(String(item?.repository_url ?? ''))?.[1];
+      if (!repo || typeof item.number !== 'number' || typeof item.state !== 'string') {
+        throw new Error('blocked_by response has an unexpected item');
+      }
+      const reason = item.state_reason;
+      result.push({
+        issue: { repo, number: item.number },
+        // gh issue view の値（CLOSED、NOT_PLANNED）と表記をそろえる
+        state: {
+          state: item.state.toUpperCase(),
+          stateReason: typeof reason === 'string' ? reason.toUpperCase() : '',
+        },
+      });
+    }
+  }
+  return result;
 }

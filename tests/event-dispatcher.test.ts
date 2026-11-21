@@ -328,7 +328,7 @@ describe('EventDispatcher', () => {
 
     it('読めない値なら起動せず、同じ値の警告は 1 回だけ出す', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      events = [withRunAt(1, '2026/11/20')];
+      events = [withRunAt(1, '2026.11.20')];
       const dispatcher = makeDispatcher();
       await dispatcher.poll();
       await dispatcher.poll();
@@ -398,7 +398,7 @@ describe('EventDispatcher', () => {
         for (const body of [
           '本文を直しただけ',
           '本文\nxangi-run-at: 2026-11-10T09:00', // 書き方が違っても同じ日時
-          '本文\nxangi-run-at: 2026/11/15',
+          '本文\nxangi-run-at: 2026/13/15',
         ]) {
           events = [{ ...makeEvent(1), body }];
           await dispatcher.poll();
@@ -620,6 +620,344 @@ describe('EventDispatcher', () => {
       states.set('o/a#1', completed);
       await dispatcher.poll();
       expect(launch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('新しい書き方の起動日時', () => {
+    const created = '2026-11-01T00:00:00Z';
+    const withLine = (n: number, line: string, createdAt: string | null = created) => ({
+      ...makeEvent(n),
+      body: `本文\n${line}`,
+      ...(createdAt ? { createdAt } : {}),
+    });
+
+    it('起動: 11/20 14時 は、createdAt の年で、JST 14:00 を過ぎてから起動する', async () => {
+      events = [withLine(1, '起動: 11/20 14時')];
+      let now = new Date('2026-11-20T04:59:00Z');
+      const dispatcher = makeDispatcher({ now: () => now });
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      now = new Date('2026-11-20T05:00:00Z');
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('新しい書き方に書き換えたときも、done の issue を起動し直す', async () => {
+      events = [withLine(1, 'xangi-run-at: 2026-11-10')];
+      const dispatcher = makeDispatcher({ now: () => new Date('2026-11-17T00:00:00Z') });
+      await dispatcher.poll();
+      alive.clear();
+      await dispatcher.poll();
+      expect(store.countByStatus('done')).toBe(1);
+      events = [withLine(1, '起動日：11月17日')];
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(2);
+    });
+
+    it('createdAt のない event（古い記録）でも壊れない', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      events = [withLine(1, '起動: 2026-11-10', null), withLine(2, '起動: 11/10', null)];
+      await makeDispatcher({ now: () => new Date('2026-11-20T00:00:00Z') }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][1].id).toBe('o/a#1');
+    });
+  });
+
+  describe('Blocked by', () => {
+    type Blocker = { issue: IssueRef; state: IssueState };
+    let blockers: Map<string, Blocker[] | Error>;
+    let getBlockedBy: ReturnType<typeof vi.fn>;
+    let getIssueState: ReturnType<typeof vi.fn>;
+    const open: IssueState = { state: 'OPEN', stateReason: '' };
+    const completed: IssueState = { state: 'CLOSED', stateReason: 'COMPLETED' };
+    const blocker = (n: number, state: IssueState, repo = 'o/a'): Blocker => ({
+      issue: { repo, number: n },
+      state,
+    });
+
+    beforeEach(() => {
+      blockers = new Map();
+      getBlockedBy = vi.fn(async (event: AgentEvent) => {
+        const v = blockers.get(event.id) ?? [];
+        if (v instanceof Error) throw v;
+        return v;
+      });
+      getIssueState = vi.fn(async () => completed);
+    });
+
+    it('Blocked by の issue がすべて completed で閉じるまで積まず、閉じたら起動する', async () => {
+      events = [makeEvent(3)];
+      blockers.set('o/a#3', [blocker(1, completed), blocker(2, open, 'other/b')]);
+      const dispatcher = makeDispatcher({ getBlockedBy, getIssueState });
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(store.has(events[0])).toBe(false);
+
+      blockers.set('o/a#3', [blocker(1, completed), blocker(2, completed, 'other/b')]);
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      // 状態は Blocked by の応答から取る
+      expect(getIssueState).not.toHaveBeenCalled();
+    });
+
+    it('xangi-run-after と両方あれば、両方に書いた issue をすべて待つ', async () => {
+      events = [{ ...makeEvent(3), body: '待つ: #9' }];
+      blockers.set('o/a#3', [blocker(1, completed)]);
+      getIssueState.mockResolvedValue(open);
+      const dispatcher = makeDispatcher({ getBlockedBy, getIssueState });
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+
+      getIssueState.mockResolvedValue(completed);
+      blockers.set('o/a#3', [blocker(1, open)]);
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+
+      blockers.set('o/a#3', [blocker(1, completed)]);
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('同じ issue を両方に書いても、重複せず待つ（getIssueState は呼ばない）', async () => {
+      events = [{ ...makeEvent(3), body: '待つ: #1' }];
+      blockers.set('o/a#3', [blocker(1, completed)]);
+      await makeDispatcher({ getBlockedBy, getIssueState }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(getIssueState).not.toHaveBeenCalled();
+    });
+
+    it('not planned / duplicate で閉じたら起動せず、通知は 1 回だけ。直し方は Blocked by から外す', async () => {
+      events = [makeEvent(3)];
+      blockers.set('o/a#3', [blocker(1, { state: 'closed', stateReason: 'not_planned' })]);
+      const dispatcher = makeDispatcher({ getBlockedBy });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(messages()).toHaveLength(1);
+      expect(messages()[0]).toContain('o/a#1');
+      expect(messages()[0]).toContain('Blocked by');
+      expect(messages()[0]).not.toContain('`xangi-run-after` の行を直して');
+
+      blockers.set('o/a#3', [blocker(2, { state: 'closed', stateReason: 'duplicate' })]);
+      await dispatcher.poll();
+      expect(messages()).toHaveLength(2);
+    });
+
+    it('API が失敗したら起動せず、警告は 1 回だけ。直ったら起動する', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      events = [makeEvent(3)];
+      blockers.set('o/a#3', new Error('HTTP 502'));
+      const dispatcher = makeDispatcher({ getBlockedBy });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('HTTP 502');
+
+      blockers.set('o/a#3', []);
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('Blocked by も xangi-run-after もなければ、今までどおり起動する。getBlockedBy がなくても起動する', async () => {
+      events = [makeEvent(1)];
+      await makeDispatcher({ getBlockedBy }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      launch.mockClear();
+      alive.clear();
+      events = [makeEvent(2)];
+      await makeDispatcher().poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('一度積んだ issue は Blocked by を確かめ直さない（再起動と同じ新しい dispatcher でも）', async () => {
+      events = [makeEvent(3)];
+      blockers.set('o/a#3', [blocker(1, completed)]);
+      await makeDispatcher({ getBlockedBy }).poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      getBlockedBy.mockClear();
+      notify.mockClear();
+
+      alive.clear();
+      blockers.set('o/a#3', [blocker(1, { state: 'closed', stateReason: 'not_planned' })]);
+      await makeDispatcher({ getBlockedBy }).poll();
+      await makeDispatcher({ getBlockedBy }).poll();
+      expect(getBlockedBy).not.toHaveBeenCalled();
+      expect(messages().some((m) => m.includes('起動しません'))).toBe(false);
+    });
+  });
+
+  describe('読めない値のコメント', () => {
+    let comment: ReturnType<typeof vi.fn>;
+    const withBody = (body: string): AgentEvent => ({ ...makeEvent(1), body });
+
+    beforeEach(() => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      comment = vi.fn().mockResolvedValue(undefined);
+    });
+
+    it('起動日時を読めなければ、読めなかった値と書ける形の例をコメントする。ログの警告も残す', async () => {
+      events = [withBody('起動: あした')];
+      await makeDispatcher({ comment }).poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(comment).toHaveBeenCalledTimes(1);
+      const message = comment.mock.calls[0][1] as string;
+      expect(message).toContain('あした');
+      expect(message).toContain('起動: 2026-11-20 14:00');
+      expect(message).toContain('起動: 11/20 14時');
+      expect(console.warn).toHaveBeenCalled();
+    });
+
+    it('待つ issue を読めなければ、読めなかった値と書ける形の例をコメントする', async () => {
+      events = [withBody('待つ: 12')];
+      await makeDispatcher({
+        comment,
+        getIssueState: async () => ({ state: 'OPEN', stateReason: '' }),
+      }).poll();
+      expect(launch).not.toHaveBeenCalled();
+      expect(comment).toHaveBeenCalledTimes(1);
+      const message = comment.mock.calls[0][1] as string;
+      expect(message).toContain('12');
+      expect(message).toContain('待つ: #12, repo#3, https://github.com/owner/repo/issues/3');
+    });
+
+    it('同じ値なら 1 回だけ。xangi を再起動しても（新しい dispatcher と store）2 回目は書かない', async () => {
+      events = [withBody('起動: あした')];
+      await makeDispatcher({ comment }).poll();
+      await makeDispatcher({ comment }).poll();
+      const reloaded = new EventStore(join(dir, 'events.json'));
+      await makeDispatcher({ comment, store: reloaded }).poll();
+      expect(comment).toHaveBeenCalledTimes(1);
+    });
+
+    it('値が変わってまた読めなければ、もう一度コメントする', async () => {
+      const dispatcher = makeDispatcher({ comment });
+      events = [withBody('起動: あした')];
+      await dispatcher.poll();
+      events = [withBody('起動: あさって')];
+      await dispatcher.poll();
+      expect(comment).toHaveBeenCalledTimes(2);
+      expect(comment.mock.calls[1][1]).toContain('あさって');
+    });
+
+    it('読めるようになったら記録を消す。また読めなくなったら、同じ値でもコメントする', async () => {
+      const dispatcher = makeDispatcher({ comment, now: () => new Date('2026-11-01T00:00:00Z') });
+      events = [withBody('起動: あした')];
+      await dispatcher.poll();
+      events = [withBody('起動: 2026-11-20')];
+      await dispatcher.poll();
+      events = [withBody('起動: あした')];
+      await dispatcher.poll();
+      expect(comment).toHaveBeenCalledTimes(2);
+    });
+
+    it('run-at と run-after は別々に 1 回ずつコメントする', async () => {
+      events = [withBody('起動: あした\n待つ: 12')];
+      const dispatcher = makeDispatcher({
+        comment,
+        getIssueState: async () => ({ state: 'OPEN', stateReason: '' }),
+      });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      // run-at が読めないあいだは run-after まで進まないので、まず run-at の 1 回
+      expect(comment).toHaveBeenCalledTimes(1);
+
+      events = [withBody('起動: 2026-11-20\n待つ: 12')];
+      await makeDispatcher({
+        comment,
+        store,
+        now: () => new Date('2026-11-21T00:00:00Z'),
+        getIssueState: async () => ({ state: 'OPEN', stateReason: '' }),
+      }).poll();
+      expect(comment).toHaveBeenCalledTimes(2);
+      expect(comment.mock.calls[1][1]).toContain('12');
+    });
+
+    it('comment が失敗しても処理は続け、記録しないので次のポーリングでもう一度試す', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      comment.mockRejectedValueOnce(new Error('gh failed'));
+      events = [withBody('起動: あした'), { ...makeEvent(2) }];
+      const dispatcher = makeDispatcher({ comment });
+      await dispatcher.poll();
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][1].id).toBe('o/a#2');
+      await dispatcher.poll();
+      expect(comment).toHaveBeenCalledTimes(2);
+      await dispatcher.poll();
+      expect(comment).toHaveBeenCalledTimes(2);
+    });
+
+    it('comment の失敗のログは、同じ値なら 1 回だけ。コメントの再試行は毎回する。値が変わればまた出す', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      comment.mockRejectedValue(new Error('gh failed'));
+      events = [withBody('起動: あした')];
+      const dispatcher = makeDispatcher({ comment });
+      await dispatcher.poll();
+      await dispatcher.poll();
+      await dispatcher.poll();
+      expect(comment).toHaveBeenCalledTimes(3);
+      expect(error).toHaveBeenCalledTimes(1);
+
+      events = [withBody('起動: あさって')];
+      await dispatcher.poll();
+      expect(error).toHaveBeenCalledTimes(2);
+    });
+
+    it('値はコードスパンで囲み、バッククォートは除く（メンションが飛ばない）', async () => {
+      events = [withBody('起動: @someone`x')];
+      await makeDispatcher({ comment }).poll();
+      const message = comment.mock.calls[0][1] as string;
+      expect(message).toContain('`@someonex`');
+      expect(message).not.toContain('「@someone');
+      expect(message).not.toContain('@someone`x');
+    });
+
+    it('待つ issue の値もコードスパンで囲む', async () => {
+      events = [withBody('待つ: @someone')];
+      await makeDispatcher({ comment }).poll();
+      expect(comment.mock.calls[0][1]).toContain('`@someone`');
+    });
+
+    describe('積んだ後の issue', () => {
+      it.each(['queued', 'running', 'done'] as const)(
+        '%s の issue には、読めない値でもコメントしない（警告と起動しない判定はそのまま）',
+        async (status) => {
+          const warn = vi.mocked(console.warn);
+          const valid = withBody('起動: 2026-11-10');
+          store.enqueue(valid);
+          if (status !== 'queued') store.setRunning(valid, 'cc-a-issue1');
+          if (status === 'running') alive.add('cc-a-issue1');
+          if (status === 'done') store.setStatus(valid, 'done');
+          events = [withBody('起動: あした')];
+          await makeDispatcher({ comment }).poll();
+          expect(comment).not.toHaveBeenCalled();
+          expect(warn).toHaveBeenCalledTimes(1);
+          expect(store.invalidSpecCommented(valid, 'runAt')).toBeUndefined();
+        }
+      );
+
+      it('needs_info の issue にはコメントする', async () => {
+        const valid = withBody('起動: 2026-11-10');
+        store.enqueue(valid);
+        store.setStatus(valid, 'needs_info');
+        events = [withBody('起動: あした')];
+        await makeDispatcher({ comment }).poll();
+        expect(comment).toHaveBeenCalledTimes(1);
+      });
+
+      it('待つ issue の読めない値も、積んだ後の issue にはコメントしない', async () => {
+        const valid = withBody('待つ: #9');
+        store.enqueue(valid);
+        events = [withBody('待つ: 12')];
+        await makeDispatcher({ comment }).poll();
+        expect(comment).not.toHaveBeenCalled();
+      });
+    });
+
+    it('comment がなくても動く', async () => {
+      events = [withBody('起動: あした')];
+      await expect(makeDispatcher().poll()).resolves.toBeUndefined();
+      expect(launch).not.toHaveBeenCalled();
     });
   });
 
