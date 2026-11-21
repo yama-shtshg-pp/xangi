@@ -60,8 +60,9 @@ export function buildHelpText(keyTableText: string): string {
     '- 起動する日: 本文の行頭に `起動: 11/20 14時`（`xangi-run-at: 2026-11-20T14:00` も可）',
     '- 前の issue を待つ: 本文の行頭に `待つ: #12, repo#3, issue の URL`',
     '  - GitHub の「Blocked by」に指定した issue も待ちます',
-    '- Slack から issue を立てる: `@xangi <key> 内容`',
-    '  - スレッドの中なら `@xangi <key>` だけで、スレッドのやり取りを issue にします',
+    // Slack の mrkdwn では < > が制御記法なので、&lt; &gt; にエスケープする（コードスパンの中も同じ）
+    '- Slack から issue を立てる: `@xangi &lt;key&gt; 内容`',
+    '  - スレッドの中なら `@xangi &lt;key&gt;` だけで、スレッドのやり取りを issue にします',
     `詳しい説明: ${usageLink('起動する日を指定する', '起動する日')} / ${usageLink('先に終わらせる-issue-を指定する', '前の issue を待つ')} / ${usageLink('slack-のメンションから-issue-を立てる', 'Slack から立てる')}`,
     'key の一覧',
     keyTableText,
