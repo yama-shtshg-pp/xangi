@@ -286,7 +286,7 @@ export interface SlackIssueCreatorOptions {
   gh?: GhExec;
 }
 
-function keyTable(targets: RepoTarget[]): string {
+export function keyTable(targets: RepoTarget[]): string {
   const rows = targets.filter((t) => t.key).map((t) => `- \`${t.key}\` ${t.repo}`);
   return rows.length > 0
     ? rows.join('\n')
